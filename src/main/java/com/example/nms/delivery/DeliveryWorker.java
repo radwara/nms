@@ -2,6 +2,7 @@ package com.example.nms.delivery;
 
 import com.example.nms.common.Channel;
 import com.example.nms.common.DeliveryStatus;
+import com.example.nms.common.Priority;
 import com.example.nms.directory.Recipient;
 import com.example.nms.directory.RecipientRepository;
 import com.example.nms.intake.Notification;
@@ -16,6 +17,7 @@ import com.example.nms.provider.SendResult;
 import com.example.nms.provider.SendResult.Accepted;
 import com.example.nms.provider.SendResult.Failed;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -55,6 +57,9 @@ public class DeliveryWorker {
 
   /** Provider code recorded when an adapter throws instead of returning a result. */
   static final String PROVIDER_EXCEPTION_CODE = "exception";
+
+  private static final List<DeliveryStatus> DUE_STATUSES =
+      List.of(DeliveryStatus.PENDING, DeliveryStatus.RETRY_SCHEDULED);
 
   private static final Comparator<Delivery> BEST_FIRST =
       Comparator.comparing((Delivery d) -> d.getPriority().code())
@@ -100,13 +105,30 @@ public class DeliveryWorker {
    * calls it.
    */
   public int runOnce() {
-    if (stopping) {
-      return 0;
+    return metrics.timePoll(this::pollOnce).worked();
+  }
+
+  /**
+   * Polls again at once while a poll saw a full batch due, for at most {@code budget}, so a backlog
+   * drains at send speed rather than one batch per poll interval.
+   */
+  public void drain(Duration budget) {
+    long deadline = System.nanoTime() + budget.toNanos();
+    while (metrics.timePoll(this::pollOnce).due() >= properties.batchSize()
+        && !stopping()
+        && System.nanoTime() < deadline) {
+      log.debug("Full batch due; polling again");
+    }
+  }
+
+  private Poll pollOnce() {
+    if (stopping()) {
+      return new Poll(0, 0);
     }
     List<Delivery> due = poll(clock.instant());
     metrics.due(due.size());
     if (due.isEmpty()) {
-      return 0;
+      return new Poll(0, 0);
     }
     List<Delivery> batch = due.subList(0, Math.min(properties.batchSize(), due.size()));
     Map<UUID, Notification> notificationsById =
@@ -120,7 +142,7 @@ public class DeliveryWorker {
 
     int worked = 0;
     for (Delivery delivery : batch) {
-      if (stopping || Thread.currentThread().isInterrupted()) {
+      if (stopping()) {
         log.info("Worker stopping; the rest of the batch stays due");
         break;
       }
@@ -133,8 +155,15 @@ public class DeliveryWorker {
         scope.close();
       }
     }
-    return worked;
+    return new Poll(due.size(), worked);
   }
+
+  private boolean stopping() {
+    return stopping || Thread.currentThread().isInterrupted();
+  }
+
+  /** Rows a poll saw due (before the batch cut) and rows it finished. */
+  private record Poll(int due, int worked) {}
 
   /** Stops {@link #runOnce()} after the delivery in progress; called when the context closes. */
   @EventListener(ContextClosedEvent.class)
@@ -142,12 +171,18 @@ public class DeliveryWorker {
     stopping = true;
   }
 
-  /** Due rows of every due status, best first: one query per status, merged here. */
+  /**
+   * Due rows, best first: one query per due status and priority, plus reclaimable leases, merged
+   * here by priority then due time.
+   */
   private List<Delivery> poll(Instant now) {
     Limit limit = Limit.of(properties.batchSize());
     List<Delivery> due = new ArrayList<>();
-    due.addAll(deliveries.findDue(DeliveryStatus.PENDING, now, limit));
-    due.addAll(deliveries.findDue(DeliveryStatus.RETRY_SCHEDULED, now, limit));
+    for (DeliveryStatus status : DUE_STATUSES) {
+      for (Priority priority : Priority.values()) {
+        due.addAll(deliveries.findDue(status, priority, now, limit));
+      }
+    }
     due.addAll(deliveries.findLeaseExpired(now, now.minus(properties.lease()), limit));
     due.sort(BEST_FIRST);
     return due;

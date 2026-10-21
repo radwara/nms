@@ -59,7 +59,8 @@ class DeliveryMetricsIT {
             "nms_deliveries_outcome_total{channel=\"EMAIL\",status=\"SENT\"} 1.0",
             "nms_deliveries_outcome_total{channel=\"SMS\",status=\"FAILED\"} 1.0",
             "nms_deliveries_outcome_total{channel=\"EMAIL\",status=\"EXPIRED\"} 1.0",
-            "nms_deliveries_due 3.0");
+            "nms_deliveries_due 3.0",
+            "nms_worker_poll_seconds_count");
 
     worker.runOnce();
 

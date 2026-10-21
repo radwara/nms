@@ -25,7 +25,8 @@ class WorkerConfiguration {
   }
 
   /**
-   * The poller: one fixed-delay task on its own one-thread scheduler, so polls never overlap. On
+   * The poller: one fixed-delay task on its own one-thread scheduler, so polls never overlap. A
+   * full batch is followed by another poll at once, for up to one interval (backlog drain). On
    * shutdown the worker stops after the delivery in progress, and the scheduler waits longer than
    * one send for it. Off with {@code nms.worker.enabled=false}.
    */
@@ -58,7 +59,8 @@ class WorkerConfiguration {
 
     @Override
     public void configureTasks(ScheduledTaskRegistrar registrar) {
-      registrar.addFixedDelayTask(worker::runOnce, properties.pollInterval());
+      Duration interval = properties.pollInterval();
+      registrar.addFixedDelayTask(() -> worker.drain(interval), interval);
     }
   }
 }

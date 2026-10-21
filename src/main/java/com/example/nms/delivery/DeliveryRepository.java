@@ -1,6 +1,7 @@
 package com.example.nms.delivery;
 
 import com.example.nms.common.DeliveryStatus;
+import com.example.nms.common.Priority;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -20,17 +21,22 @@ import org.springframework.transaction.annotation.Transactional;
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
 
   /**
-   * Due rows of one status, best first. One query per status (not {@code status in}) so the {@code
-   * (status, priority, next_attempt_at)} index serves both the filter and the order.
+   * Due rows of one status and priority, earliest first. Equality on both leading columns of the
+   * {@code (status, priority, next_attempt_at)} index makes this a range scan that stops after
+   * {@code limit} rows; one query per status and per priority, merged by the worker. Ordering by
+   * priority inside one query would first walk every not-yet-due row of a better priority.
    */
   @Query(
       """
       select d from Delivery d
-      where d.status = :status and d.nextAttemptAt <= :now
-      order by d.status, d.priority, d.nextAttemptAt
+      where d.status = :status and d.priority = :priority and d.nextAttemptAt <= :now
+      order by d.nextAttemptAt
       """)
   List<Delivery> findDue(
-      @Param("status") DeliveryStatus status, @Param("now") Instant now, Limit limit);
+      @Param("status") DeliveryStatus status,
+      @Param("priority") Priority priority,
+      @Param("now") Instant now,
+      Limit limit);
 
   /** {@code SENDING} rows whose lease started before {@code claimedBefore} (crashed mid-send). */
   @Query(

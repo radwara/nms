@@ -69,7 +69,7 @@ class DeliveryWorkerTest {
     Notification notification = notification("user-ok", Priority.NORMAL, NOW, null);
     first = polled(notification);
     Delivery second = polled(notification);
-    when(deliveries.findDue(eq(DeliveryStatus.PENDING), any(), any()))
+    when(deliveries.findDue(eq(DeliveryStatus.PENDING), eq(Priority.NORMAL), any(), any()))
         .thenReturn(List.of(first, second));
     when(notifications.findAllById(any())).thenReturn(List.of(notification));
     Recipient recipient = mock(Recipient.class);
