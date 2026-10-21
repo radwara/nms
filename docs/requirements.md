@@ -22,7 +22,7 @@ The `Test` column is filled in as items are implemented; it becomes the traceabi
 | FR-2.3 | Status includes delivery status per recipient x channel | 4.2 | |
 | FR-2.4 | Status includes relevant timestamps | 4.2 | |
 | FR-2.5 | State model is documented and defensible | 4.2 | |
-| FR-3.1 | Channels are determined from requested channels, severity, recipient preferences, and a routing policy | 4.3 | `ChannelSelectionTest`, `RoutingIT`, `RoutingPolicyIT`, `RoutingPropertiesTest`, `SubmitStatementsIT` |
+| FR-3.1 | Channels are determined from requested channels, severity, recipient preferences, and a routing policy | 4.3 | `ChannelSelectionTest`, `RoutingIT`, `RoutingPolicyIT`, `RoutingPropertiesTest`, `RoutingRollbackIT`, `SubmitStatementsIT` |
 | FR-4.1 | Same idempotency key does not create a second logical notification | 4.4 | `SubmitNotificationIT`, `SubmitConcurrencyIT`, `SubmitLockTimeoutIT`, `SubmitReplayAfterExpiryIT`, `RequestHashTest` |
 | FR-4.2 | Reprocessing a queued delivery does not cause uncontrolled duplicate side effects | 4.4 | |
 | FR-4.3 | Duplicate/suppressed requests are visible in status or audit history | 4.4 | Submit side: `SubmitNotificationIT` (`DUPLICATE_SUBMISSION`) |
