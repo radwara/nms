@@ -4,6 +4,7 @@ import static com.example.nms.support.TestApiKeys.DEMO1;
 import static com.example.nms.support.TestApiKeys.HEADER;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.nms.support.ApiTestController;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -59,13 +60,17 @@ class TraceIdIT {
 
   @Test
   void traceIdIsInTheJsonLogLine(CapturedOutput output) {
-    mvc.get().uri(SOURCE).header("traceparent", TRACEPARENT).exchange();
+    mvc.get()
+        .uri("/api/v1/test/log")
+        .header(HEADER, DEMO1)
+        .header("traceparent", TRACEPARENT)
+        .exchange();
 
     String line =
         output
             .getOut()
             .lines()
-            .filter(l -> l.contains("API key missing"))
+            .filter(l -> l.contains(ApiTestController.LOG_PROBE))
             .findFirst()
             .orElseThrow();
     assertThat(line).startsWith("{").contains("\"traceId\":\"" + TRACE_ID + "\"");

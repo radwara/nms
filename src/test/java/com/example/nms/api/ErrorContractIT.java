@@ -42,6 +42,57 @@ class ErrorContractIT {
   }
 
   @Test
+  void wrongJsonTypeIs4003WithTheJsonPath() {
+    MvcTestResult result =
+        mvc.post()
+            .uri("/api/v1/test/typed")
+            .header(HEADER, DEMO1)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("{\"count\": 1, \"items\": [{\"qty\": 2}, {\"qty\": \"many-submitted\"}]}")
+            .exchange();
+
+    assertSingleError(result, 400, 4003, "items[1].qty");
+    assertThat(result).bodyText().doesNotContain("many-submitted");
+  }
+
+  @Test
+  void wrongJsonShapeAtTheRootIs4003WithoutField() {
+    MvcTestResult result =
+        mvc.post()
+            .uri("/api/v1/test/typed")
+            .header(HEADER, DEMO1)
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("[1, 2]")
+            .exchange();
+
+    assertSingleError(result, 400, 4003, null);
+  }
+
+  @Test
+  void missingBodyIs4002() {
+    assertSingleError(
+        mvc.post()
+            .uri(ECHO)
+            .header(HEADER, DEMO1)
+            .contentType(MediaType.APPLICATION_JSON)
+            .exchange(),
+        400,
+        4002,
+        null);
+  }
+
+  @Test
+  void missingHeaderIs4001AndMissingParameterIs4004() {
+    assertSingleError(
+        mvc.get().uri("/api/v1/test/header").header(HEADER, DEMO1).exchange(),
+        400,
+        4001,
+        "X-Probe");
+    assertSingleError(
+        mvc.get().uri("/api/v1/test/param").header(HEADER, DEMO1).exchange(), 400, 4004, "count");
+  }
+
+  @Test
   void wellFormedJsonIsAccepted() {
     assertThat(
             mvc.post()
@@ -116,7 +167,11 @@ class ErrorContractIT {
         .anySatisfy(
             line ->
                 assertThat(line)
-                    .contains("Unhandled exception", "\"traceId\":\"" + traceId + "\""));
+                    .contains(
+                        "Request failed with status 500",
+                        "\"traceId\":\"" + traceId + "\"",
+                        "IllegalStateException"));
+    assertThat(output.getOut()).doesNotContain(ApiTestController.UNEXPECTED_DETAIL);
   }
 
   @Test

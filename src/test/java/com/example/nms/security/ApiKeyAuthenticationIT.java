@@ -5,6 +5,7 @@ import static com.example.nms.support.TestApiKeys.DEMO1;
 import static com.example.nms.support.TestApiKeys.DEMO2;
 import static com.example.nms.support.TestApiKeys.HEADER;
 import static com.example.nms.support.TestApiKeys.OTHER1;
+import static com.example.nms.support.TestApiKeys.sha256Hex;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;
@@ -22,8 +23,8 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ObjectNode;
 
-/** #12: API-key authentication per ADR-0001. */
-@SpringBootTest
+/** #12: API-key authentication per ADR-0001. Failed-auth logs are DEBUG, so DEBUG is on here. */
+@SpringBootTest(properties = "logging.level.com.example.nms.security=DEBUG")
 @AutoConfigureMockMvc
 @ExtendWith(OutputCaptureExtension.class)
 class ApiKeyAuthenticationIT {
@@ -102,11 +103,12 @@ class ApiKeyAuthenticationIT {
   }
 
   @Test
-  void webhooksAreNotBlockedByTheApiKeyFilter() {
-    MvcTestResult result = mvc.post().uri("/api/v1/webhooks/sim-email").exchange();
+  void webhooksAreOutsideTheApiKeyFilterAndDoNotAcceptAnApiKey() {
+    MvcTestResult result =
+        mvc.post().uri("/api/v1/webhooks/sim-email/test-probe").header(HEADER, DEMO1).exchange();
 
-    assertSingleError(result, 404, 4040, null);
-    assertThat(result).doesNotContainHeader("WWW-Authenticate");
+    assertSingleError(result, 401, 4011, "X-Webhook-Token");
+    assertThat(result).hasHeader("WWW-Authenticate", "Token header=\"X-Webhook-Token\"");
   }
 
   @Test
@@ -117,14 +119,17 @@ class ApiKeyAuthenticationIT {
     assertThat(get("not-a-key-at-all")).hasStatus(401);
 
     assertThat(output.getOut())
-        .contains("API key rejected: keyId=demo1", "API key rejected: unknown keyId")
+        .contains(
+            "API key accepted: keyId=demo1",
+            "API key rejected: keyId=demo1",
+            "API key rejected: unknown keyId")
         .doesNotContain(
             "dev-only",
             "wrong-secret",
             "another-secret",
             "nosuchkeyid",
             "not-a-key-at-all",
-            "4530bfad54b2432bdec5406b7f9f668987e2697b931ed715f965f6c02aec995b");
+            sha256Hex(DEMO1));
   }
 
   private static void assertUnauthorized(MvcTestResult result, int code) {
