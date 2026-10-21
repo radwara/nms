@@ -59,8 +59,11 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
   "type": "FRAUD_ALERT",
   "severity": "CRITICAL",
   "priority": "HIGH",
-  "recipients": ["user1", "user2"],
-  "channels": ["EMAIL"],
+  "recipients": [
+    { "userId": "user1", "channels": ["SMS"] },
+    { "userId": "user2", "channels": ["EMAIL"] },
+    { "userId": "user3" }
+  ],
   "subject": "Suspicious login",
   "body": "We noticed a login from a new device.",
   "scheduledAt": null,
@@ -68,7 +71,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 }
 ```
 
-- `channels` is optional. When present it applies to every recipient; when absent each recipient's enabled channels are used. Different channels for different recipients means separate requests.
+- Each recipient carries its own optional `channels`. When absent, the recipient's enabled channels from the directory are used. Contact addresses always come from the directory, never the request.
 - One notification is created per recipient. All notifications from one request share an internal `submissionId` (not exposed).
 - `202` on a new submission, `200` on an idempotent replay (same key, same payload) with the same body.
 
@@ -145,7 +148,7 @@ Every error, including authentication failures raised before any controller, use
   "traceId": "8f3c2a1b9d",
   "errors": [
     { "code": 4001, "field": "Idempotency-Key", "message": "Required header is missing" },
-    { "code": 4004, "field": "recipients[2]", "message": "Must not be blank" }
+    { "code": 4004, "field": "recipients[2].userId", "message": "Must not be blank" }
   ]
 }
 ```
@@ -202,7 +205,7 @@ API keys and webhook tokens are configuration, not tables (ADR-0001).
 
 Resolved per notification (one recipient):
 
-1. Candidates: request `channels` if given, else the recipient's enabled channels.
+1. Candidates: the recipient's `channels` from the request if given, else the recipient's enabled channels.
 2. Remove channels the recipient opted out of, and channels with no contact address.
 3. Apply policy from config, e.g. `CRITICAL` adds `SMS`. In greenfield an opt-out always wins over policy (revisited in the ambiguous scenario, A-30).
 4. Each remaining channel becomes a `Delivery`. Every add and remove is audited with a reason.
