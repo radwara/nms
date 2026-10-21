@@ -202,6 +202,43 @@ Conventions: timestamps are UTC instants; ids exposed by the API are UUIDs (not 
 
 A missing preference row means **enabled** (opt-out model, usual for transactional alerts). A channel is usable only if enabled and the recipient has an address for it.
 
+#### Simulated outcomes (seeded addresses)
+
+The simulated providers derive the outcome from the address, so every path is reproducible from a seeded recipient. Seeds are synthetic (`sim.test`, fictional `+1555010...` numbers) and live in Flyway `V2__seed_directory.sql`.
+
+- Email: `<send>.<callback>@sim.test`, e.g. `timeout.delivered@sim.test`
+- SMS: `+1555010SSCC`, SS = send code, CC = callback code, e.g. `+15550100200`
+
+| Send | Email token | SMS `SS` | Send result |
+|---|---|---|---|
+| Accepted | `ok` | `00` | `SENT` |
+| `TRANSIENT` | `transient` | `01` | Fails every attempt; retried until exhausted (`FAILED`) or `EXPIRED` |
+| `TIMEOUT` | `timeout` | `02` | Fails every attempt; retried until exhausted (`FAILED`) or `EXPIRED` |
+| `RATE_LIMITED` | `ratelimit` | `03` | Fails every attempt; retried until exhausted (`FAILED`) or `EXPIRED` |
+| `PERMANENT_REJECTION` | `reject` | `04` | `FAILED` |
+| `INVALID_RECIPIENT` | `invalid` | `05` | `FAILED` |
+| `AUTH_ERROR` | `autherror` | `06` | `FAILED` |
+| Fail twice, then accept | `flaky2` | `12` | Two `TRANSIENT` failures, then `SENT` |
+
+| Callback (after `SENT`) | Email token | SMS `CC` |
+|---|---|---|
+| `DELIVERED` | `delivered` | `00` |
+| `BOUNCED` (delivery `FAILED`) | `bounce` | n/a (SMS has no bounce) |
+| `FAILED` | `failed` | `02` |
+| No callback (stays `SENT`) | `silent` | `09` |
+
+Seeded recipients:
+
+| Id | Email (@sim.test) | Phone | Shows |
+|---|---|---|---|
+| `user-ok` | `ok.delivered` | `+15550100000` | Both channels, happy path (no preference rows) |
+| `user-email-only` | `ok.delivered` | none | Email only |
+| `user-sms-optout` | `ok.delivered` | `+15550100000` | SMS opted out (`enabled = false`), email explicitly enabled |
+| `user-transient`, `user-timeout`, `user-ratelimit`, `user-reject`, `user-invalid`, `user-autherror`, `user-flaky2` | `<token>.delivered` | `+1555010<SS>00` | One per send outcome, both channels |
+| `user-bounce` | `ok.bounce` | none | Bounce callback |
+| `user-cb-failed` | `ok.failed` | `+15550100002` | Failed callback |
+| `user-silent` | `ok.silent` | `+15550100009` | No callback |
+
 ### Intake
 
 `idempotency_record`
