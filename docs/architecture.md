@@ -115,6 +115,27 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 }
 ```
 
+### Provider callbacks
+
+Each provider adapter owns its payload format and the mapping to our statuses. Simulated formats follow the shape of common vendors.
+
+`POST /webhooks/email` (batched, SendGrid-style):
+
+```json
+[
+  { "eventId": "e-01", "messageId": "em-123", "event": "delivered", "timestamp": "..." },
+  { "eventId": "e-02", "messageId": "em-456", "event": "bounce", "reason": "mailbox unavailable", "timestamp": "..." }
+]
+```
+
+`POST /webhooks/sms` (single event, Twilio-style; dedupe key is `messageSid` + `messageStatus`):
+
+```json
+{ "messageSid": "SM-789", "messageStatus": "undelivered", "errorCode": "30003", "timestamp": "..." }
+```
+
+Response: `200` with no body for processed, duplicate, ignored, and unmatched events, so vendors do not retry them. Vendor free-text reasons are mapped to reason codes; raw text is not stored because it can contain addresses.
+
 ### Errors
 
 Every error, including authentication failures raised before any controller, uses one body (`Content-Type: application/problem+json`; all RFC 9457 members are optional, so this stays compliant):
