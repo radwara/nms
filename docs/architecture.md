@@ -390,21 +390,33 @@ sequenceDiagram
     participant I as Intake
     participant D as Database
     S->>A: POST /notifications (X-API-Key, Idempotency-Key)
-    A->>A: authenticate, validate
-    A->>I: submit
-    I->>D: insert IdempotencyRecord (unique sourceSystem + key)
-    alt key exists, same hash
-        I->>D: audit DUPLICATE_SUBMISSION
-        I-->>S: 200 + original notifications
-    else key exists, different hash
+    A->>A: authenticate; validate 400-class (all field errors at once)
+    A->>I: submit (new transaction)
+    I->>D: look up live IdempotencyRecord (sourceSystem + key)
+    alt live record, same hash
+        I->>D: audit DUPLICATE_SUBMISSION per notification
+        I-->>S: 200 + original notifications (request order)
+    else live record, different hash
         I-->>S: 409 / 4091
-    else new
-        I->>D: per recipient: Notification, routed Deliveries (PENDING), audit ACCEPTED, ROUTED, QUEUED
-        I-->>S: 202 + notifications
+    else no live record
+        I->>D: time rules (4221, 4222) and recipient existence (4223)
+        alt any violation
+            I-->>S: 422, all of them; nothing written
+        else accepted
+            I->>D: claim key: insert record, or conditional update of the expired one
+            I->>D: insert Notifications (batched), flush
+            I->>D: audit ACCEPTED per notification
+            I->>D: route the submission once (Deliveries, ROUTED, QUEUED; #9)
+            I-->>S: 202 + notifications (after commit)
+        end
     end
 ```
 
-One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Order of checks: 400-class validation (all field errors together), then inside the transaction look up the key (live record: same hash replays with 200, different hash is 409), then for new submissions only the time rules (4221, 4222) and recipients (4223); nothing is written on a rejection. Then claim the key (insert, or conditional update of an expired record), then notifications. Rejections after authentication (400, 409, 413, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes and the trace id (e.g. `codes 4004,4003; trace 8f3c...`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
+One transaction per submission: the idempotency record, notifications, audits, and routing commit together or not at all; `submit` refuses to run inside a caller's transaction. The key is claimed before any content is written, so a concurrent request with the same key fails there: a unique-key violation (new key) or zero rows updated (expired key) is handled outside the failed transaction by re-reading and replaying the winner (or 409 if the payload differs). If the database lock wait times out because the winner is still running, intake re-reads up to 3 times (100, 200, 300 ms); still nothing committed returns 409 / 4092 with `Retry-After: 1`. Outcome logs are written after commit.
+
+Rejections after authentication (400, 409, 413, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes and the trace id (e.g. `codes 4004,4003; trace 8f3c...`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
+
+Replay reads only `(recipientId, id)` pairs by `submissionId` (no entity loads) and writes one `DUPLICATE_SUBMISSION` per notification. Trade-off: a replay of 100 recipients is 100 audit inserts (batched), in exchange for every notification's own history and duplicate count (status `duplicateSubmissions`, #11) being one indexed lookup. One event per submission would need a join on `submissionId` for every status read.
 
 ### Deliver
 
@@ -486,7 +498,7 @@ What to alert on:
 
 | Concern | Prototype | Production |
 |---|---|---|
-| Database | H2 | PostgreSQL |
+| Database | H2 | PostgreSQL; set `reWriteBatchedInserts=true` on the JDBC URL so Hibernate's insert batches become multi-row inserts |
 | Work claiming | Conditional update on `id`, `status`, and `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
