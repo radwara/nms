@@ -433,7 +433,7 @@ What to alert on:
 | Concern | Prototype | Production |
 |---|---|---|
 | Database | H2 | PostgreSQL |
-| Work claiming | Conditional update on `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
+| Work claiming | Conditional update on `status` and `claimed_at` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |

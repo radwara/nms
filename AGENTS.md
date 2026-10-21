@@ -40,4 +40,13 @@ issue -> branch <type>/<issue>-<slug> -> tests from acceptance criteria -> imple
 
 ## Build and test
 
-To be filled in by the scaffold issue.
+```
+./mvnw verify                 # format check, compile (-Werror), unit + integration tests, coverage
+./mvnw spotless:apply         # fix formatting
+./mvnw spring-boot:run        # run on :8080; H2 file database in ./data (override with NMS_DATA_DIR); run from repo root
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev   # same, plus H2 console at /h2-console and plain-text logs
+```
+
+- Unit tests: `*Test` (surefire). Integration tests: `*IT` (failsafe, full Spring context). Each test context gets its own in-memory database (`src/test/resources/config/application.yml`, which overrides the main config instead of replacing it).
+- Coverage report: `target/site/jacoco/index.html`.
+- Tests that need metrics endpoints use `@AutoConfigureMetrics` (Spring Boot disables metrics export in tests).

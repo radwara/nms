@@ -14,6 +14,15 @@ AI drafts within a task; the engineer approves every gate. No code is merged wit
 
 Brownfield starts with a written impact analysis of the tagged greenfield code. Ambiguous starts with options and questions before any code.
 
+## Roles
+
+| Role | Who |
+|---|---|
+| Engineer | Decides, approves gates, reviews and merges PRs |
+| Orchestrator (AI session) | Plans the issue, briefs the implementer, checks output against acceptance criteria, opens the PR, runs reviewers, brings findings to the engineer |
+| Implementer (AI subagent) | Writes code and tests for one issue on its branch; runs `./mvnw verify`; does not push |
+| Reviewers (AI subagents, fresh context) | Bug, architecture, performance, and general reviews per PR |
+
 ## Per-issue loop
 
 ```
@@ -24,24 +33,33 @@ issue (acceptance criteria) -> branch -> tests from criteria -> AI implements
 
 ## Independent review checkpoints
 
-A fresh-context reviewer (separate AI session with no access to the implementing conversation) critiques the work at each logical point. Findings and the engineer's disposition (accepted / rejected / deferred, with reason) are posted on the PR.
+One independent review per PR by a fresh-context reviewer (separate AI session with no access to the implementing conversation), plus one-off reviews at planning points (design freeze, backlog). Findings and the engineer's disposition (accepted / rejected / deferred, with reason) are recorded on the PR.
 
-| Checkpoint | Reviewer focus |
+Reviewers are chosen per PR:
+
+| Reviewer | When |
 |---|---|
-| Design freeze | Over-complication, spec gaps, correctness risks, scope vs budget |
-| Every PR | Bugs and edge cases against the issue's acceptance criteria |
-| Greenfield tag | Code vs `architecture.md` drift; spec coverage; scope remaining |
-| Brownfield impact analysis | Missed layers, regression risk, test plan, before any code |
-| Ambiguous-scenario options | Are options and questions real; is the decision defensible |
-| Before submission | Acts as the grader: runs the demo from the README, checks every requirement |
+| Bug finder | Every PR |
+| Architecture review | PRs that set or change structure: scaffold, schema, API platform, worker, brownfield |
+| Performance check | PRs with queries, polling, or hot paths: schema indexes, worker poll and claim, status and audit reads, dedup lookup |
+| General review | PRs with heavy or cross-cutting acceptance criteria: checks intent against spec, issue, ADRs, and architecture |
+
+Milestone PRs widen the focus:
+
+| PR | Additional focus |
+|---|---|
+| Greenfield tag (#13) | Code vs `architecture.md` drift; spec coverage |
+| Brownfield impact analysis (#14) | Missed layers, regression risk, test plan, before any code |
+| Ambiguous options (#15) | Are the options and questions real; is the decision defensible |
+| Final (#16) | Acts as the grader: runs the README from a fresh clone, checks every requirement |
 
 ## Checks
 
 | Layer | Check |
 |---|---|
 | Before code | Acceptance criteria approved; tests written from them |
-| Local | `./mvnw verify`; git hooks block private files and non-conforming commit messages |
-| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build, demo script smoke run |
+| Local | `./mvnw verify`; local git hooks enforce commit message format |
+| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build and non-root check; demo script smoke run (from #13) |
 | Dependencies | Dependabot for Maven and GitHub Actions |
 | Review | Independent reviewer + engineer review on every PR |
 | Traceability | `requirements.md` Test column filled per merged requirement |
