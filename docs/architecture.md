@@ -504,6 +504,7 @@ What to alert on:
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
 | Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
+| Lock waits | H2 `LOCK_TIMEOUT` (default 2 s) triggers 409/4092 for a racing retry | Set PostgreSQL `lock_timeout` (it waits forever by default) so the 4092 path engages |
 
 ## Out of scope
 
