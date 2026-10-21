@@ -1,7 +1,9 @@
 package com.example.nms.intake;
 
+import com.example.nms.common.Channel;
 import com.example.nms.common.Priority;
 import com.example.nms.common.Severity;
+import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
@@ -10,6 +12,7 @@ import jakarta.persistence.PostLoad;
 import jakarta.persistence.PostPersist;
 import jakarta.persistence.Transient;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.data.domain.Persistable;
 
@@ -39,8 +42,9 @@ public class Notification implements Persistable<UUID> {
 
   private String recipientId;
 
-  /** Channels as requested, e.g. {@code SMS,EMAIL}; null means "use preferences". */
-  private String requestedChannels;
+  /** Channels as requested, in request order; null means "use preferences". */
+  @Convert(converter = ChannelListConverter.class)
+  private List<Channel> requestedChannels;
 
   private String subject;
 
@@ -65,7 +69,7 @@ public class Notification implements Persistable<UUID> {
       Severity severity,
       Priority priority,
       String recipientId,
-      String requestedChannels,
+      List<Channel> requestedChannels,
       String subject,
       String body,
       Instant scheduledAt,
@@ -79,7 +83,7 @@ public class Notification implements Persistable<UUID> {
     this.severity = severity;
     this.priority = priority;
     this.recipientId = recipientId;
-    this.requestedChannels = requestedChannels;
+    this.requestedChannels = requestedChannels == null ? null : List.copyOf(requestedChannels);
     this.subject = subject;
     this.body = body;
     this.scheduledAt = scheduledAt;
@@ -120,7 +124,7 @@ public class Notification implements Persistable<UUID> {
     return recipientId;
   }
 
-  public String getRequestedChannels() {
+  public List<Channel> getRequestedChannels() {
     return requestedChannels;
   }
 
