@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
@@ -22,6 +23,7 @@ class ApiKeyFilter extends OncePerRequestFilter {
 
   static final String HEADER = "X-API-Key";
   static final String URL_PATTERN = "/api/*";
+  static final String CHALLENGE = "ApiKey header=\"" + HEADER + "\"";
   private static final String WEBHOOKS_PREFIX = "/api/v1/webhooks/";
 
   private static final Logger log = LoggerFactory.getLogger(ApiKeyFilter.class);
@@ -48,17 +50,20 @@ class ApiKeyFilter extends OncePerRequestFilter {
     String key = request.getHeader(HEADER);
     if (key == null || key.isBlank()) {
       log.warn("API key missing");
-      errorWriter.write(
-          response, new ApiError(ErrorCode.CREDENTIALS_MISSING, HEADER, "API key is missing"));
+      reject(response, new ApiError(ErrorCode.CREDENTIALS_MISSING, HEADER, "API key is missing"));
       return;
     }
     Optional<SourceSystem> sourceSystem = authenticator.authenticate(key);
     if (sourceSystem.isEmpty()) {
-      errorWriter.write(
-          response, new ApiError(ErrorCode.CREDENTIALS_INVALID, HEADER, "API key is invalid"));
+      reject(response, new ApiError(ErrorCode.CREDENTIALS_INVALID, HEADER, "API key is invalid"));
       return;
     }
     request.setAttribute(SourceSystem.REQUEST_ATTRIBUTE, sourceSystem.get());
     chain.doFilter(request, response);
+  }
+
+  private void reject(HttpServletResponse response, ApiError error) throws IOException {
+    response.setHeader(HttpHeaders.WWW_AUTHENTICATE, CHALLENGE);
+    errorWriter.write(response, error);
   }
 }

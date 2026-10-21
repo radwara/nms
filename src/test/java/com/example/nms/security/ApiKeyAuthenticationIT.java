@@ -58,13 +58,13 @@ class ApiKeyAuthenticationIT {
 
   @Test
   void missingKeyIs4011() {
-    assertSingleError(mvc.get().uri(SOURCE).exchange(), 401, 4011, HEADER);
-    assertSingleError(mvc.get().uri(SOURCE).header(HEADER, " ").exchange(), 401, 4011, HEADER);
+    assertUnauthorized(mvc.get().uri(SOURCE).exchange(), 4011);
+    assertUnauthorized(mvc.get().uri(SOURCE).header(HEADER, " ").exchange(), 4011);
   }
 
   @Test
   void unknownKeyIdIs4012() {
-    assertSingleError(get("nms_nosuchkeyid_dev-only"), 401, 4012, HEADER);
+    assertUnauthorized(get("nms_nosuchkeyid_dev-only"), 4012);
   }
 
   @Test
@@ -72,7 +72,7 @@ class ApiKeyAuthenticationIT {
     MvcTestResult wrongSecret = get("nms_demo1_wrong-secret");
     MvcTestResult unknownKeyId = get("nms_nosuchkeyid_dev-only");
 
-    assertSingleError(wrongSecret, 401, 4012, HEADER);
+    assertUnauthorized(wrongSecret, 4012);
     assertThat(withoutTraceId(wrongSecret)).isEqualTo(withoutTraceId(unknownKeyId));
   }
 
@@ -88,12 +88,12 @@ class ApiKeyAuthenticationIT {
         "nms_demo-1_dev-only"
       })
   void malformedKeyIs4012(String key) {
-    assertSingleError(get(key), 401, 4012, HEADER);
+    assertUnauthorized(get(key), 4012);
   }
 
   @Test
   void secretMayContainUnderscoreButMustMatchExactly() {
-    assertSingleError(get(DEMO1 + "_"), 401, 4012, HEADER);
+    assertUnauthorized(get(DEMO1 + "_"), 4012);
   }
 
   @Test
@@ -103,7 +103,10 @@ class ApiKeyAuthenticationIT {
 
   @Test
   void webhooksAreNotBlockedByTheApiKeyFilter() {
-    assertThat(mvc.post().uri("/api/v1/webhooks/sim-email")).hasStatus(404);
+    MvcTestResult result = mvc.post().uri("/api/v1/webhooks/sim-email").exchange();
+
+    assertSingleError(result, 404, 4040, null);
+    assertThat(result).doesNotContainHeader("WWW-Authenticate");
   }
 
   @Test
@@ -122,6 +125,11 @@ class ApiKeyAuthenticationIT {
             "nosuchkeyid",
             "not-a-key-at-all",
             "4530bfad54b2432bdec5406b7f9f668987e2697b931ed715f965f6c02aec995b");
+  }
+
+  private static void assertUnauthorized(MvcTestResult result, int code) {
+    assertSingleError(result, 401, code, HEADER);
+    assertThat(result).hasHeader("WWW-Authenticate", "ApiKey header=\"X-API-Key\"");
   }
 
   private MvcTestResult get(String key) {
