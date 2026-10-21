@@ -17,7 +17,7 @@ class ErrorCodeTest {
     "405, 4050, Method not allowed",
     "406, 4060, Not acceptable",
     "409, 4000, Conflict",
-    "413, 4000, Content Too Large",
+    "413, 4130, Payload too large",
     "500, 5000, Internal error",
     "503, 5000, Service Unavailable"
   })

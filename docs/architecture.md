@@ -176,6 +176,7 @@ Every error, including authentication failures raised before any controller, use
 | 4060 | 406 | Not acceptable (`Accept` cannot be satisfied) |
 | 4091 | 409 | Idempotency key reused with a different payload |
 | 4092 | 409 | Request with this Idempotency-Key is still in progress: another request holds the key past the lock wait and short replay retries. `Retry-After: 1` |
+| 4130 | 413 | Payload too large: JSON body over 64 KB (also other Jackson stream limits, e.g. nesting depth) |
 | 4151 | 415 | Unsupported content type |
 | 4221 | 422 | `expiresAt` is in the past |
 | 4222 | 422 | `scheduledAt` is after `expiresAt` |
@@ -461,7 +462,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 - Paths whose raw URI has `.` or `..` segments (including `%2e` and `..;x` forms) are rejected with 400 / 4000 before authentication, so the path a filter checks is the path the client sent.
 - Failed authentication is logged at DEBUG (ids only), so a flood of bad credentials cannot flood the logs. Configuring a documented demo credential logs a WARN at startup.
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
-- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation.
+- Input limits: JSON bodies max 64 KB (413 / 4130, enforced while parsing, so chunked bodies are bounded too), max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
 - Secrets come from environment variables; nothing secret is committed.
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.

@@ -33,6 +33,7 @@ import org.springframework.web.servlet.NoHandlerFoundException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 import org.springframework.web.util.DisconnectedClientHelper;
 import tools.jackson.core.JacksonException;
+import tools.jackson.core.exc.StreamConstraintsException;
 import tools.jackson.databind.exc.MismatchedInputException;
 
 /**
@@ -58,14 +59,24 @@ class ApiExceptionHandler {
     writer.write(response, ex.errors());
   }
 
-  /** Wrong JSON type or format for a field is 4003 with its path; unparseable JSON is 4002. */
+  /**
+   * Wrong JSON type or format for a field is 4003 with its path; unparseable JSON is 4002; a
+   * document over the size limit is 4130.
+   */
   @ExceptionHandler(HttpMessageNotReadableException.class)
   void notReadable(HttpMessageNotReadableException ex, HttpServletResponse response)
       throws IOException {
     writer.write(response, notReadableError(ex));
   }
 
+  /**
+   * A stream constraint (document over {@link JsonLimitsConfiguration#MAX_DOCUMENT_BYTES}, or
+   * nesting or number size beyond Jackson's limits) is 413 / 4130.
+   */
   static ApiError notReadableError(HttpMessageNotReadableException ex) {
+    if (ex.getCause() instanceof StreamConstraintsException) {
+      return ApiError.of(ErrorCode.PAYLOAD_TOO_LARGE);
+    }
     return ex.getCause() instanceof MismatchedInputException mismatch
         ? ApiError.of(ErrorCode.INVALID_VALUE, jsonPath(mismatch))
         : ApiError.of(ErrorCode.MALFORMED_JSON);

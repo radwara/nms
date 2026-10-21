@@ -238,6 +238,21 @@ class SubmitValidationIT {
   }
 
   @Test
+  void bodyOver64KilobytesIs413WithTheStandardBody() {
+    ObjectNode body = valid("user-ok");
+    body.put("padding", "SECRET-PADDING-" + "p".repeat(1024 * 1024));
+
+    MvcTestResult result = submit(body);
+
+    assertSingleError(result, 413, 4130, null);
+    assertThat(result).bodyText().doesNotContain("SECRET");
+    assertThat(
+            jdbc.queryForObject(
+                "select detail from audit_event where type = 'REJECTED'", String.class))
+        .startsWith("codes 4130");
+  }
+
+  @Test
   void nonObjectBodyIs4003() {
     assertSingleError(submit(newKey(), "[1, 2]"), 400, 4003, null);
   }
