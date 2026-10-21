@@ -24,6 +24,7 @@ import com.example.nms.provider.SendResult.Failed;
 import com.example.nms.provider.SimulatedEmailProvider;
 import com.example.nms.support.MutableClock;
 import jakarta.persistence.EntityManagerFactory;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -393,6 +394,103 @@ class DeliveryWorkerIT {
     assertThat(history(queued.getId())).containsExactly("SENT");
   }
 
+  // Rows that cannot be sent, and providers that misbehave
+
+  @Test
+  void poisonRowsFailWithoutAClaimAndDoNotStallTheQueue() {
+    Instant now = clock.instant();
+    List<Delivery> noAdapter = new ArrayList<>();
+    List<Delivery> noAddress = new ArrayList<>();
+    List<Delivery> noRecipient = new ArrayList<>();
+    List<Delivery> noNotification = new ArrayList<>();
+    // The schema's foreign keys rule out the last two; switch them off to create the rows.
+    jdbc.execute("set referential_integrity false");
+    try {
+      for (int i = 0; i < 5; i++) {
+        Notification ok = notifications.save(notification("user-ok", Priority.HIGH, now, null));
+        noAdapter.add(deliveries.save(onProvider(ok, "gone-email", now)));
+        Notification emailOnly =
+            notifications.save(notification("user-email-only", Priority.HIGH, now, null));
+        noAddress.add(deliveries.save(delivery(emailOnly, Channel.SMS, now)));
+        Notification ghost =
+            notifications.save(notification("no-such-user", Priority.HIGH, now, null));
+        noRecipient.add(deliveries.save(delivery(ghost, Channel.EMAIL, now)));
+        Notification unsaved = notification("user-ok", Priority.HIGH, now, null);
+        noNotification.add(deliveries.save(delivery(unsaved, Channel.EMAIL, now)));
+      }
+    } finally {
+      jdbc.execute("set referential_integrity true");
+    }
+    Delivery valid = queue("user-ok", Channel.EMAIL, Priority.NORMAL, now, null);
+
+    worker.runOnce();
+    worker.runOnce();
+
+    assertThat(reload(valid).getStatus()).isEqualTo(DeliveryStatus.SENT);
+    assertFailedBeforeSend(noAdapter, "NO_PROVIDER_ADAPTER", true);
+    assertFailedBeforeSend(noAddress, "NO_ADDRESS", true);
+    assertFailedBeforeSend(noRecipient, "MISSING_RECIPIENT", true);
+    assertFailedBeforeSend(noNotification, "MISSING_NOTIFICATION", false);
+  }
+
+  @Test
+  void throwingProviderIsRetriedAsTransientUntilExhausted() {
+    Notification notification =
+        notifications.save(notification("user-ok", Priority.NORMAL, clock.instant(), null));
+    Delivery queued =
+        deliveries.save(onProvider(notification, ThrowingProvider.NAME, clock.instant()));
+
+    drain();
+
+    Delivery done = reload(queued);
+    assertThat(done.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+    assertThat(done.getFailureReason()).isEqualTo("RETRIES_EXHAUSTED");
+    assertThat(done.getAttemptCount()).isEqualTo(4);
+    assertThat(history(queued.getId()))
+        .filteredOn(line -> line.startsWith("ATTEMPT_FAILED"))
+        .containsExactly(
+            "ATTEMPT_FAILED attempt 1, TRANSIENT, code exception",
+            "ATTEMPT_FAILED attempt 2, TRANSIENT, code exception",
+            "ATTEMPT_FAILED attempt 3, TRANSIENT, code exception",
+            "ATTEMPT_FAILED attempt 4, TRANSIENT, code exception");
+  }
+
+  @Test
+  void reclaimedRowWithNoAttemptsLeftFailsWithoutASend() {
+    Instant start = clock.instant();
+    Delivery queued = queue("user-ok", Channel.EMAIL, Priority.NORMAL, start, null);
+    // Four attempts started; the last worker died mid-send.
+    jdbc.update(
+        "update delivery set status = 'SENDING', attempt_count = 4, claimed_at = ? where id = ?",
+        Timestamp.from(start),
+        queued.getId());
+    long sendCalls = email.sendCalls();
+    clock.advance(Duration.ofSeconds(31));
+
+    worker.runOnce();
+
+    Delivery done = reload(queued);
+    assertThat(done.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+    assertThat(done.getFailureReason()).isEqualTo("RETRIES_EXHAUSTED");
+    assertThat(done.getAttemptCount()).isEqualTo(4);
+    assertThat(email.sendCalls()).isEqualTo(sendCalls);
+    assertThat(history(queued.getId())).containsExactly("FAILED RETRIES_EXHAUSTED");
+  }
+
+  @Test
+  void reclaimedRowPastExpiresAtExpiresAndSaysItMayHaveBeenSent() {
+    Instant start = clock.instant();
+    Delivery queued =
+        queue("user-ok", Channel.EMAIL, Priority.NORMAL, start, start.plusSeconds(10));
+    deliveries.claim(queued.getId(), DeliveryStatus.PENDING, 0, start);
+    clock.advance(Duration.ofSeconds(31));
+
+    worker.runOnce();
+
+    assertThat(reload(queued).getStatus()).isEqualTo(DeliveryStatus.EXPIRED);
+    assertThat(history(queued.getId())).containsExactly("EXPIRED lease expired after expiresAt");
+  }
+
   // Batch loading
 
   @Test
@@ -486,6 +584,29 @@ class DeliveryWorkerIT {
                 scheduledAt,
                 expiresAt));
     return ((SubmitResult.Created) result).notifications().getFirst().notificationId();
+  }
+
+  private void assertFailedBeforeSend(List<Delivery> rows, String reason, boolean audited) {
+    for (Delivery row : rows) {
+      Delivery done = reload(row);
+      assertThat(done.getStatus()).as(reason).isEqualTo(DeliveryStatus.FAILED);
+      assertThat(done.getFailureReason()).isEqualTo(reason);
+      assertThat(done.getAttemptCount()).as("not claimed").isZero();
+      assertThat(history(row.getId()))
+          .containsExactlyElementsOf(audited ? List.of("FAILED " + reason) : List.of());
+    }
+  }
+
+  private static Delivery onProvider(Notification notification, String provider, Instant dueAt) {
+    return new Delivery(
+        UUID.randomUUID(),
+        notification.getId(),
+        Channel.EMAIL,
+        provider,
+        notification.getPriority(),
+        RoutingReason.REQUESTED,
+        dueAt,
+        notification.getCreatedAt());
   }
 
   private Delivery reload(Delivery delivery) {
@@ -605,8 +726,34 @@ class DeliveryWorkerIT {
     }
   }
 
+  /** An adapter that breaks its contract by throwing. */
+  static class ThrowingProvider implements ChannelProvider {
+
+    static final String NAME = "throwing-email";
+
+    @Override
+    public String name() {
+      return NAME;
+    }
+
+    @Override
+    public Channel channel() {
+      return Channel.EMAIL;
+    }
+
+    @Override
+    public SendResult send(SendRequest request) {
+      throw new IllegalStateException("adapter bug");
+    }
+  }
+
   @TestConfiguration
   static class TestBeans {
+
+    @Bean
+    ThrowingProvider throwingProvider() {
+      return new ThrowingProvider();
+    }
 
     @Bean
     @Primary

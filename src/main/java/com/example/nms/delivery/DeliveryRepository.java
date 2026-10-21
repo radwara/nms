@@ -109,4 +109,20 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("status") DeliveryStatus status,
       @Param("reason") String reason,
       @Param("now") Instant now);
+
+  /** Moves a row's due time without claiming it, e.g. after an unexpected error. */
+  @Transactional
+  @Modifying(clearAutomatically = true, flushAutomatically = true)
+  @Query(
+      """
+      update Delivery d
+      set d.nextAttemptAt = :nextAttemptAt, d.version = d.version + 1, d.updatedAt = :now
+      where d.id = :id and d.status = :expected and d.version = :version
+      """)
+  int postpone(
+      @Param("id") UUID id,
+      @Param("expected") DeliveryStatus expected,
+      @Param("version") long version,
+      @Param("nextAttemptAt") Instant nextAttemptAt,
+      @Param("now") Instant now);
 }

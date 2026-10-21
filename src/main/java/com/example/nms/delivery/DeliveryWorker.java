@@ -22,25 +22,39 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Component;
 
 /**
  * Sends due deliveries (ADR-0004). One poll reads each due status separately, merges by priority
- * then due time, and works the best {@code batch-size} rows one by one: expire, or claim
- * (committed) then send outside any transaction then write the outcome (conditional on the claim's
- * version). Each attempt runs under its own trace id. Addresses and content are never logged.
+ * then due time, and works the best {@code batch-size} rows one by one: expire or fail a row that
+ * cannot be sent (no claim), or claim (committed) then send outside any transaction then write the
+ * outcome (conditional on the claim's version). Each row runs under its own trace id. Addresses and
+ * content are never logged.
  */
 @Component
 public class DeliveryWorker {
 
   private static final Logger log = LoggerFactory.getLogger(DeliveryWorker.class);
+
+  /** Failure reasons for a row that cannot be sent; it fails without a claim. */
+  static final String MISSING_NOTIFICATION = "MISSING_NOTIFICATION";
+
+  static final String MISSING_RECIPIENT = "MISSING_RECIPIENT";
+  static final String NO_PROVIDER_ADAPTER = "NO_PROVIDER_ADAPTER";
+  static final String NO_ADDRESS = "NO_ADDRESS";
+
+  /** Provider code recorded when an adapter throws instead of returning a result. */
+  static final String PROVIDER_EXCEPTION_CODE = "exception";
 
   private static final Comparator<Delivery> BEST_FIRST =
       Comparator.comparing((Delivery d) -> d.getPriority().code())
@@ -56,6 +70,7 @@ public class DeliveryWorker {
   private final DeliveryMetrics metrics;
   private final Clock clock;
   private final WorkerProperties properties;
+  private volatile boolean stopping;
 
   DeliveryWorker(
       DeliveryRepository deliveries,
@@ -80,9 +95,14 @@ public class DeliveryWorker {
 
   /**
    * One poll: works up to {@code batch-size} due deliveries and returns how many it finished an
-   * attempt or expiry for. Not thread-safe by design; one single-threaded poller calls it.
+   * attempt or a final state for. Stops between deliveries once the worker is stopping or the
+   * thread is interrupted; the rest stay due. Not thread-safe by design; one single-threaded poller
+   * calls it.
    */
   public int runOnce() {
+    if (stopping) {
+      return 0;
+    }
     List<Delivery> due = poll(clock.instant());
     metrics.due(due.size());
     if (due.isEmpty()) {
@@ -100,20 +120,26 @@ public class DeliveryWorker {
 
     int worked = 0;
     for (Delivery delivery : batch) {
-      Notification notification = notificationsById.get(delivery.getNotificationId());
+      if (stopping || Thread.currentThread().isInterrupted()) {
+        log.info("Worker stopping; the rest of the batch stays due");
+        break;
+      }
       TraceIds.Scope scope = TraceIds.open(TraceIds.newId());
       try {
-        if (work(delivery, notification, recipientsById.get(notification.getRecipientId()))) {
+        if (work(delivery, notificationsById, recipientsById)) {
           worked++;
         }
-      } catch (RuntimeException e) {
-        // A row left SENDING is reclaimed after the lease; others stay due.
-        log.error("Delivery {} not processed", delivery.getId(), RedactedThrowable.of(e));
       } finally {
         scope.close();
       }
     }
     return worked;
+  }
+
+  /** Stops {@link #runOnce()} after the delivery in progress; called when the context closes. */
+  @EventListener(ContextClosedEvent.class)
+  public void stop() {
+    stopping = true;
   }
 
   /** Due rows of every due status, best first: one query per status, merged here. */
@@ -127,33 +153,128 @@ public class DeliveryWorker {
     return due;
   }
 
-  private boolean work(Delivery delivery, Notification notification, Recipient recipient) {
+  /**
+   * Before the claim, every failure ends or moves the row (conditional on the polled version), so
+   * no row can keep sorting first and stall the queue. After the claim, a row whose outcome cannot
+   * be written stays {@code SENDING} and is reclaimed after the lease.
+   */
+  private boolean work(
+      Delivery delivery,
+      Map<UUID, Notification> notificationsById,
+      Map<String, Recipient> recipientsById) {
     Instant now = clock.instant();
-    if (isExpired(notification, now)) {
-      return expire(delivery, notification, now);
-    }
-    ChannelProvider provider =
-        providers
-            .find(delivery.getProvider())
-            .orElseThrow(
-                () -> new IllegalStateException("No provider adapter " + delivery.getProvider()));
-    SendRequest request =
-        new SendRequest(
-            delivery.getId(),
-            address(delivery.getChannel(), recipient),
-            notification.getSubject(),
-            notification.getBody());
-
-    if (deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 0) {
-      log.debug("Delivery {} claimed by another worker", delivery.getId());
+    Step step;
+    try {
+      step = prepareAndClaim(delivery, notificationsById, recipientsById, now);
+    } catch (RuntimeException e) {
+      postpone(delivery, now, e);
       return false;
     }
-    Claim claim = Claim.of(delivery, notification);
-    SendResult result = provider.send(request);
-    return switch (result) {
-      case Accepted accepted -> sent(claim, accepted);
-      case Failed failed -> failed(claim, failed);
-    };
+    if (!(step instanceof Step.Claimed claimed)) {
+      return ((Step.Done) step).written();
+    }
+    try {
+      SendResult result = send(claimed.provider(), claimed.request(), claimed.claim());
+      return switch (result) {
+        case Accepted accepted -> sent(claimed.claim(), accepted);
+        case Failed failed -> failed(claimed.claim(), failed);
+      };
+    } catch (RuntimeException e) {
+      log.error(
+          "Delivery {} outcome not written; resent after the lease",
+          delivery.getId(),
+          RedactedThrowable.of(e));
+      return false;
+    }
+  }
+
+  private Step prepareAndClaim(
+      Delivery delivery,
+      Map<UUID, Notification> notificationsById,
+      Map<String, Recipient> recipientsById,
+      Instant now) {
+    Notification notification = notificationsById.get(delivery.getNotificationId());
+    if (notification == null) {
+      return failBeforeSend(delivery, null, MISSING_NOTIFICATION, now);
+    }
+    if (isExpired(notification, now)) {
+      return new Step.Done(expire(delivery, notification, now));
+    }
+    if (retryPolicy.exhausted(delivery.getAttemptCount())) {
+      return failBeforeSend(delivery, notification, RetryPolicy.RETRIES_EXHAUSTED, now);
+    }
+    Recipient recipient = recipientsById.get(notification.getRecipientId());
+    if (recipient == null) {
+      return failBeforeSend(delivery, notification, MISSING_RECIPIENT, now);
+    }
+    Optional<ChannelProvider> provider = providers.find(delivery.getProvider());
+    if (provider.isEmpty()) {
+      return failBeforeSend(delivery, notification, NO_PROVIDER_ADAPTER, now);
+    }
+    String address = address(delivery.getChannel(), recipient);
+    if (address == null) {
+      return failBeforeSend(delivery, notification, NO_ADDRESS, now);
+    }
+    if (deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 0) {
+      log.debug("Delivery {} claimed by another worker", delivery.getId());
+      return new Step.Done(false);
+    }
+    return new Step.Claimed(
+        Claim.of(delivery, notification),
+        provider.get(),
+        new SendRequest(
+            delivery.getId(), address, notification.getSubject(), notification.getBody()));
+  }
+
+  /** The adapter contract says it returns; a throw is a failed call like any other. */
+  private static SendResult send(ChannelProvider provider, SendRequest request, Claim claim) {
+    try {
+      return provider.send(request);
+    } catch (RuntimeException e) {
+      log.warn(
+          "Provider {} threw on delivery {}; treated as TRANSIENT",
+          provider.name(),
+          claim.id(),
+          RedactedThrowable.of(e));
+      return new Failed(ErrorCategory.TRANSIENT, PROVIDER_EXCEPTION_CODE);
+    }
+  }
+
+  private Step failBeforeSend(
+      Delivery delivery, Notification notification, String reason, Instant now) {
+    boolean written = outcomes.failedBeforeSend(delivery, notification, reason, now);
+    if (written) {
+      metrics.outcome(delivery.getChannel(), DeliveryStatus.FAILED);
+      if (RetryPolicy.RETRIES_EXHAUSTED.equals(reason)) {
+        log.warn(
+            "Delivery {} on {} failed before send: {}",
+            delivery.getId(),
+            delivery.getChannel(),
+            reason);
+      } else {
+        log.error(
+            "Delivery {} on {} failed before send: {}",
+            delivery.getId(),
+            delivery.getChannel(),
+            reason);
+      }
+    }
+    return new Step.Done(written);
+  }
+
+  /** Pushes the row's due time forward so it stops sorting first; the error is logged by type. */
+  private void postpone(Delivery delivery, Instant now, RuntimeException cause) {
+    Instant next = now.plus(retryPolicy.postponement(delivery.getAttemptCount()));
+    log.error(
+        "Delivery {} not processed; postponed to {}",
+        delivery.getId(),
+        next,
+        RedactedThrowable.of(cause));
+    try {
+      deliveries.postpone(delivery.getId(), delivery.getStatus(), delivery.getVersion(), next, now);
+    } catch (RuntimeException e) {
+      log.error("Delivery {} could not be postponed", delivery.getId(), RedactedThrowable.of(e));
+    }
   }
 
   private boolean expire(Delivery delivery, Notification notification, Instant now) {
@@ -230,17 +351,21 @@ public class DeliveryWorker {
     return expiresAt != null && !now.isBefore(expiresAt);
   }
 
+  /** The recipient's address for {@code channel}, or {@code null}. */
   private static String address(Channel channel, Recipient recipient) {
-    String address =
-        switch (channel) {
-          case EMAIL -> recipient.getEmail();
-          case SMS -> recipient.getPhone();
-        };
-    if (address == null) {
-      // Routing only selects channels with an address, and the directory is read-only.
-      throw new IllegalStateException("Recipient " + recipient.getId() + " has no " + channel);
-    }
-    return address;
+    return switch (channel) {
+      case EMAIL -> recipient.getEmail();
+      case SMS -> recipient.getPhone();
+    };
+  }
+
+  /** What happened before the send. */
+  private sealed interface Step {
+
+    /** Handled without a send; {@code written} if this worker wrote the row. */
+    record Done(boolean written) implements Step {}
+
+    record Claimed(Claim claim, ChannelProvider provider, SendRequest request) implements Step {}
   }
 
   private static <T, K> Set<K> ids(Collection<T> items, Function<T, K> id) {

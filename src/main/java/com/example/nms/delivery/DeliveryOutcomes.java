@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 class DeliveryOutcomes {
 
   static final String EXPIRED_BEFORE_SEND = "before send";
+  static final String EXPIRED_AFTER_LEASE = "lease expired after expiresAt";
   static final String EXPIRED_BEFORE_RETRY = "next attempt after expiresAt";
 
   private final DeliveryRepository deliveries;
@@ -75,7 +76,10 @@ class DeliveryOutcomes {
     return true;
   }
 
-  /** A due delivery already past {@code expiresAt}, as polled (not claimed): no send. */
+  /**
+   * A due delivery already past {@code expiresAt}, as polled (not claimed): no send. A reclaimed
+   * {@code SENDING} row may have been sent by the worker that lost it, so its detail says so.
+   */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
   public boolean expiredBeforeSend(Delivery due, Notification n, Instant now) {
     int updated =
@@ -84,8 +88,28 @@ class DeliveryOutcomes {
     if (updated == 0) {
       return false;
     }
-    audit.expired(
-        n.getSourceSystem(), n.getId(), due.getId(), due.getChannel(), EXPIRED_BEFORE_SEND, now);
+    String detail =
+        due.getStatus() == DeliveryStatus.SENDING ? EXPIRED_AFTER_LEASE : EXPIRED_BEFORE_SEND;
+    audit.expired(n.getSourceSystem(), n.getId(), due.getId(), due.getChannel(), detail, now);
+    return true;
+  }
+
+  /**
+   * A due delivery that cannot be sent, as polled (not claimed): {@code FAILED} with {@code
+   * reason}, no send. Without its notification there is no source system to audit under, so only
+   * the row is written.
+   */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean failedBeforeSend(Delivery due, Notification n, String reason, Instant now) {
+    int updated =
+        deliveries.finish(
+            due.getId(), due.getStatus(), due.getVersion(), DeliveryStatus.FAILED, reason, now);
+    if (updated == 0) {
+      return false;
+    }
+    if (n != null) {
+      audit.failed(n.getSourceSystem(), n.getId(), due.getId(), due.getChannel(), reason, now);
+    }
     return true;
   }
 

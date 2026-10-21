@@ -34,10 +34,10 @@ class DeliveryMetrics {
         .increment();
   }
 
-  /** A delivery reached {@code SENT}, {@code FAILED}, or {@code EXPIRED} in the worker. */
+  /** A delivery reached {@code SENT}, {@code FAILED}, or {@code EXPIRED}. */
   void outcome(Channel channel, DeliveryStatus status) {
     Counter.builder("nms.deliveries.outcome")
-        .description("Deliveries reaching SENT, FAILED, or EXPIRED in the worker")
+        .description("Deliveries reaching SENT, FAILED, or EXPIRED")
         .tag("channel", channel.name())
         .tag("status", status.name())
         .register(registry)
