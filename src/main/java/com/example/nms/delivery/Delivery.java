@@ -10,6 +10,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
 import jakarta.persistence.Version;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -60,7 +61,7 @@ public class Delivery {
 
   protected Delivery() {}
 
-  /** A new {@code PENDING} delivery, due at {@code nextAttemptAt}. */
+  /** A new {@code PENDING} delivery, due at {@code nextAttemptAt}. Every argument is required. */
   public Delivery(
       UUID id,
       UUID notificationId,
@@ -70,16 +71,16 @@ public class Delivery {
       RoutingReason routingReason,
       Instant nextAttemptAt,
       Instant createdAt) {
-    this.id = id;
-    this.notificationId = notificationId;
-    this.channel = channel;
-    this.provider = provider;
+    this.id = Objects.requireNonNull(id, "id");
+    this.notificationId = Objects.requireNonNull(notificationId, "notificationId");
+    this.channel = Objects.requireNonNull(channel, "channel");
+    this.provider = Objects.requireNonNull(provider, "provider");
     this.status = DeliveryStatus.PENDING;
-    this.priority = priority;
-    this.routingReason = routingReason;
+    this.priority = Objects.requireNonNull(priority, "priority");
+    this.routingReason = Objects.requireNonNull(routingReason, "routingReason");
     this.attemptCount = 0;
-    this.nextAttemptAt = nextAttemptAt;
-    this.createdAt = createdAt;
+    this.nextAttemptAt = Objects.requireNonNull(nextAttemptAt, "nextAttemptAt");
+    this.createdAt = Objects.requireNonNull(createdAt, "createdAt");
     this.updatedAt = createdAt;
   }
 
