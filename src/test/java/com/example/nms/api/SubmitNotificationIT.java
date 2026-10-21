@@ -24,6 +24,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -95,9 +96,11 @@ class SubmitNotificationIT {
         .isNull();
 
     for (Map.Entry<String, UUID> id : ids) {
-      assertThat(auditTypes(id.getValue())).containsExactly("ACCEPTED");
+      assertThat(auditTypes(id.getValue())).first().isEqualTo("ACCEPTED");
     }
-    assertThat(jdbc.queryForObject("select count(*) from delivery", Integer.class)).isZero();
+    // Routed in the same transaction (details in RoutingIT): user-ok SMS + EMAIL as requested,
+    // the other two EMAIL only (no phone; SMS opted out).
+    assertThat(jdbc.queryForObject("select count(*) from delivery", Integer.class)).isEqualTo(4);
   }
 
   @Test
@@ -105,14 +108,23 @@ class SubmitNotificationIT {
     String key = newKey();
     String body = valid("user-ok", "user-email-only").toString();
     List<Map.Entry<String, UUID>> original = ids(submit(DEMO1, key, body));
+    Integer deliveries = jdbc.queryForObject("select count(*) from delivery", Integer.class);
+    Map<UUID, List<String>> before = new LinkedHashMap<>();
+    original.forEach(id -> before.put(id.getValue(), auditTypes(id.getValue())));
 
     MvcTestResult replay = submit(DEMO2, key, body); // other key of the same source system
 
     assertThat(replay).hasStatus(200);
     assertThat(ids(replay)).isEqualTo(original);
     assertThat(notifications.count()).isEqualTo(2);
+    // Not routed again: same deliveries, and the history only gains the duplicate.
+    assertThat(jdbc.queryForObject("select count(*) from delivery", Integer.class))
+        .isEqualTo(deliveries);
     for (Map.Entry<String, UUID> id : original) {
-      assertThat(auditTypes(id.getValue())).containsExactly("ACCEPTED", "DUPLICATE_SUBMISSION");
+      List<String> expected = new ArrayList<>(before.get(id.getValue()));
+      expected.add("DUPLICATE_SUBMISSION");
+      assertThat(expected).first().isEqualTo("ACCEPTED");
+      assertThat(auditTypes(id.getValue())).isEqualTo(expected);
     }
   }
 
