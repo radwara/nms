@@ -76,6 +76,9 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 - Each recipient carries its own optional `channels`. When absent, the recipient's enabled channels from the directory are used. Contact addresses always come from the directory, never the request.
 - One notification is created per recipient. All notifications from one request share an internal `submissionId` (not exposed).
 - `202` on a new submission, `200` on an idempotent replay (same key, same payload) with the same body.
+- Limits: `recipients` 1..100 with distinct `userId` (max 64), `eventId` <= 128, `type` <= 64, `subject` <= 200, `body` <= 5000, `Idempotency-Key` <= 128. `channels`, when given, is a non-empty list of distinct channels; omit it to use preferences.
+- Timestamps: ISO-8601 with offset or zone (e.g. `2026-10-21T10:00:00Z`), years 1..9999, stored at microsecond precision. Unknown properties (including `sourceSystem`) are ignored.
+- Keys are honored for `nms.idempotency.retention` (default `7d`, env `NMS_IDEMPOTENCY_RETENTION`). Validation runs before the key lookup, so a retry sent after the original's `expiresAt` gets 4221, not the replay.
 
 ```json
 {
@@ -399,7 +402,7 @@ sequenceDiagram
     end
 ```
 
-One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Validation failures after authentication are audited as `REJECTED` in a separate transaction. "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
+One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Order inside the transaction: look up the key (live record: replay or 409), check recipients (unknown: 422, nothing written), claim the key (insert, or conditional update of an expired record), then notifications. Rejections after authentication (400, 409, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes (e.g. `codes 4004,4003`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
 
 ### Deliver
 
