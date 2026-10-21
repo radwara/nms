@@ -28,7 +28,8 @@ Callers are other systems (machine-to-machine). The spec does not define authent
 - `sourceSystem` comes from the authenticated key, never from the request body.
 - Reads are tenant-scoped: a source can only read its own notifications; others get 404.
 - Implemented as a plain request filter that writes the standard error body (not Spring Security), to keep 401s in the same format with minimal code.
-- Missing key: 401 / 4011. Malformed key, unknown `keyId`, or wrong secret: 401 / 4012 with an identical body. Logs carry `keyId` only (for configured keyIds), never the key or its hash.
+- Missing key: 401 / 4011. Malformed key, unknown `keyId`, or wrong secret: 401 / 4012 with an identical body. Failures are logged at DEBUG with `keyId` only (for configured keyIds), never the key or its hash.
+- Provider webhooks use the same scheme with a per-provider token in `X-Webhook-Token` (hash of the full token, constant-time compare, several tokens per provider). The token must belong to the provider in the path (`/api/v1/webhooks/{provider}/...`); a token for another provider is 4012. 401s carry `WWW-Authenticate: Token header="X-Webhook-Token"`.
 
 SHA-256 rather than bcrypt/argon2: keys are 256-bit random values, not low-entropy passwords, so a slow hash adds per-request latency without adding security.
 
@@ -36,7 +37,9 @@ SHA-256 rather than bcrypt/argon2: keys are 256-bit random values, not low-entro
 
 `NMS_API_KEYS` (property `nms.security.api-keys`): `keyId:sourceSystem:sha256hex[,...]`, where `sha256hex` is the lowercase hex SHA-256 of the full key. Entries may share a `sourceSystem` (rotation). Empty: every `/api` call gets 401. A malformed entry fails startup.
 
-Scope: `/api/**` except `/api/v1/webhooks/**` (own token, #11). `/actuator/**` is outside.
+`NMS_WEBHOOK_TOKENS` (property `nms.security.webhook-tokens`): `provider:sha256hex[,...]`, provider `[a-z0-9-]{1,32}`. Same rules: several entries per provider allowed, empty rejects every callback, malformed fails startup.
+
+Scope: API keys on `/api/**` except `/api/v1/webhooks/**`; webhook tokens on `/api/v1/webhooks/**`. `/actuator/**` is outside both. Both filters reject `.` / `..` path segments (400 / 4000).
 
 Generate a key and its config entry:
 
@@ -47,15 +50,22 @@ echo "$KEY"       # hand to the caller once; never stored
 printf '%s' "$KEY" | openssl dgst -sha256 -r | cut -d' ' -f1   # entry: billing1:<sourceSystem>:<this hash>
 ```
 
-### Demo keys (dev profile and tests only)
+A webhook token is generated the same way without the `nms_<keyId>_` prefix; its entry is `<provider>:<hash>`.
 
-Not secrets and deliberately not random. Hashes live in `application-dev.yml` and `src/test/resources/config/application.yml`; never configure them elsewhere.
+### Demo credentials (dev profile and tests only)
 
-| Key | keyId | sourceSystem |
+Not secrets and deliberately not random. Hashes live in `application-dev.yml` and `src/test/resources/config/application.yml`; never configure them elsewhere. Startup logs a WARN when any of them is configured.
+
+| API key | keyId | sourceSystem |
 |---|---|---|
 | `nms_demo1_dev-only` | `demo1` | `demo-app` |
 | `nms_demo2_dev-only` | `demo2` | `demo-app` (second key, rotation) |
 | `nms_other1_dev-only` | `other1` | `other-app` |
+
+| Webhook token | provider |
+|---|---|
+| `sim-email-dev-only` | `sim-email` |
+| `sim-sms-dev-only` | `sim-sms` |
 
 ## Production path
 
