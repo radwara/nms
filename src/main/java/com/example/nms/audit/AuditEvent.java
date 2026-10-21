@@ -30,7 +30,8 @@ public class AuditEvent {
 
   private UUID deliveryId;
 
-  private String type;
+  @Enumerated(EnumType.STRING)
+  private AuditEventType type;
 
   @Enumerated(EnumType.STRING)
   private Channel channel;
@@ -45,7 +46,7 @@ public class AuditEvent {
       String sourceSystem,
       UUID notificationId,
       UUID deliveryId,
-      String type,
+      AuditEventType type,
       Channel channel,
       String detail,
       Instant occurredAt) {
@@ -74,7 +75,7 @@ public class AuditEvent {
     return deliveryId;
   }
 
-  public String getType() {
+  public AuditEventType getType() {
     return type;
   }
 

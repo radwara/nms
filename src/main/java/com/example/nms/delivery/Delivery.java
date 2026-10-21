@@ -35,7 +35,8 @@ public class Delivery {
   @Convert(converter = PriorityCodeConverter.class)
   private Priority priority;
 
-  private String routingReason;
+  @Enumerated(EnumType.STRING)
+  private RoutingReason routingReason;
 
   private int attemptCount;
 
@@ -66,7 +67,7 @@ public class Delivery {
       Channel channel,
       String provider,
       Priority priority,
-      String routingReason,
+      RoutingReason routingReason,
       Instant nextAttemptAt,
       Instant createdAt) {
     this.id = id;
@@ -106,7 +107,7 @@ public class Delivery {
     return priority;
   }
 
-  public String getRoutingReason() {
+  public RoutingReason getRoutingReason() {
     return routingReason;
   }
 

@@ -101,7 +101,7 @@ class DeliveryConstraintsIT {
         channel,
         "sim-" + channel.name().toLowerCase(Locale.ROOT),
         Priority.HIGH,
-        "REQUESTED",
+        RoutingReason.REQUESTED,
         now,
         now);
   }
