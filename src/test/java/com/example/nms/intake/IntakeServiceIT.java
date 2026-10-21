@@ -2,6 +2,7 @@ package com.example.nms.intake;
 
 import static com.example.nms.support.SubmitRequests.clearSubmissions;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.example.nms.audit.AuditEvent;
 import com.example.nms.audit.AuditEventRepository;
@@ -14,25 +15,36 @@ import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /** #8: intake transaction details that the API tests cannot see. */
 @SpringBootTest
 @Import(IntakeServiceIT.AuditingRoutingConfiguration.class)
+@ExtendWith(OutputCaptureExtension.class)
 class IntakeServiceIT {
 
   @Autowired private IntakeService intake;
   @Autowired private JdbcTemplate jdbc;
+  @Autowired private PlatformTransactionManager transactionManager;
+  @Autowired private AuditingRoutingStep routing;
 
   @BeforeEach
   void clean() {
     clearSubmissions(jdbc);
+    routing.fail = false;
   }
 
   @Test
@@ -50,6 +62,31 @@ class IntakeServiceIT {
     }
   }
 
+  @Test
+  void acceptedIsLoggedOnlyAfterCommit(CapturedOutput output) {
+    intake.submit(command("user-ok"));
+    assertThat(output.getOut()).contains("accepted: 1 notifications");
+
+    routing.fail = true;
+    assertThatThrownBy(() -> intake.submit(command("user-email-only")))
+        .isInstanceOf(IllegalStateException.class);
+
+    assertThat(output.getOut().split("accepted: 1 notifications", -1)).hasSize(2);
+    assertThat(jdbc.queryForObject("select count(*) from notification", Integer.class))
+        .isEqualTo(1);
+  }
+
+  @Test
+  void refusesToJoinACallersTransaction() {
+    assertThatThrownBy(
+            () ->
+                new TransactionTemplate(transactionManager)
+                    .executeWithoutResult(status -> intake.submit(command("user-ok"))))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("must not run inside a transaction");
+    assertThat(jdbc.queryForObject("select count(*) from notification", Integer.class)).isZero();
+  }
+
   static SubmitCommand command(String... userIds) {
     return new SubmitCommand(
         "demo-app",
@@ -65,25 +102,52 @@ class IntakeServiceIT {
         null);
   }
 
-  /** Stands in for routing (#9): one ROUTED event per notification, in the same transaction. */
+  /**
+   * Stands in for routing (#9): one ROUTED event per notification, in the same transaction; can be
+   * told to make the commit fail.
+   */
+  static class AuditingRoutingStep implements RoutingStep {
+
+    private final AuditEventRepository events;
+    volatile boolean fail;
+
+    AuditingRoutingStep(AuditEventRepository events) {
+      this.events = events;
+    }
+
+    @Override
+    public void route(List<Notification> notifications, Instant now) {
+      notifications.forEach(
+          n ->
+              events.save(
+                  new AuditEvent(
+                      n.getSourceSystem(),
+                      n.getId(),
+                      null,
+                      AuditEventType.ROUTED,
+                      null,
+                      "stub",
+                      now)));
+      if (fail) {
+        // Fails the commit itself, after all intake code has run.
+        TransactionSynchronizationManager.registerSynchronization(
+            new TransactionSynchronization() {
+              @Override
+              public void beforeCommit(boolean readOnly) {
+                throw new IllegalStateException("commit failed");
+              }
+            });
+      }
+    }
+  }
+
   @TestConfiguration(proxyBeanMethods = false)
   static class AuditingRoutingConfiguration {
 
     @Bean
     @Primary
-    RoutingStep auditingRoutingStep(AuditEventRepository events) {
-      return (List<Notification> notifications, Instant now) ->
-          notifications.forEach(
-              n ->
-                  events.save(
-                      new AuditEvent(
-                          n.getSourceSystem(),
-                          n.getId(),
-                          null,
-                          AuditEventType.ROUTED,
-                          null,
-                          "stub",
-                          now)));
+    AuditingRoutingStep auditingRoutingStep(AuditEventRepository events) {
+      return new AuditingRoutingStep(events);
     }
   }
 }

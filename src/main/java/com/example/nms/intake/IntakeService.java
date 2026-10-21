@@ -24,6 +24,8 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -69,7 +71,14 @@ public class IntakeService {
     this.transaction = new TransactionTemplate(transactionManager);
   }
 
+  /**
+   * Runs its own transactions, so it must not be called inside one: a replay after a failed attempt
+   * needs a fresh persistence context, and the submission must commit on its own.
+   */
   public SubmitResult submit(SubmitCommand command) {
+    if (TransactionSynchronizationManager.isActualTransactionActive()) {
+      throw new IllegalStateException("IntakeService.submit must not run inside a transaction");
+    }
     String requestHash = RequestHash.of(command);
     try {
       return transaction.execute(status -> attempt(command, requestHash));
@@ -143,11 +152,13 @@ public class IntakeService {
     // ACCEPTED first, so each notification's history starts with it and routing events follow.
     created.forEach(n -> audit.accepted(command.sourceSystem(), n.getId(), now));
     routing.route(created, now);
-    log.info(
-        "Submission {} accepted: {} notifications for source system {}",
-        submissionId,
-        created.size(),
-        command.sourceSystem());
+    afterCommit(
+        () ->
+            log.info(
+                "Submission {} accepted: {} notifications for source system {}",
+                submissionId,
+                created.size(),
+                command.sourceSystem()));
     return new Created(view(created));
   }
 
@@ -210,10 +221,12 @@ public class IntakeService {
     // One event per notification: each notification's history and duplicate count show it.
     ordered.forEach(
         n -> audit.duplicateSubmission(command.sourceSystem(), n.notificationId(), now));
-    log.info(
-        "Submission {} replayed for source system {}",
-        record.getSubmissionId(),
-        command.sourceSystem());
+    afterCommit(
+        () ->
+            log.info(
+                "Submission {} replayed for source system {}",
+                record.getSubmissionId(),
+                command.sourceSystem()));
     return new Replayed(ordered);
   }
 
@@ -250,6 +263,17 @@ public class IntakeService {
 
   private static String describe(SubmitResult result) {
     return result.getClass().getSimpleName();
+  }
+
+  /** Logs outcomes only once they are durable. */
+  private static void afterCommit(Runnable action) {
+    TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            action.run();
+          }
+        });
   }
 
   /** Database precision is microseconds; truncating keeps in-memory and stored values equal. */
