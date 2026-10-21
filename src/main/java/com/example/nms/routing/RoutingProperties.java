@@ -4,6 +4,7 @@ import com.example.nms.common.Channel;
 import com.example.nms.common.Severity;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -20,6 +21,9 @@ record RoutingProperties(
   /** Width of {@code delivery.provider}. */
   static final int MAX_PROVIDER_LENGTH = 32;
 
+  /** Lower-case names, matched exactly (no trimming): they are stored and used in webhook paths. */
+  private static final Pattern PROVIDER_NAME = Pattern.compile("[a-z0-9-]+");
+
   RoutingProperties {
     severityEscalation =
         severityEscalation == null
@@ -31,13 +35,15 @@ record RoutingProperties(
     providers = providers == null ? Map.of() : Map.copyOf(providers);
     for (Channel channel : Channel.values()) {
       String provider = providers.get(channel);
-      if (provider == null || provider.isBlank() || provider.length() > MAX_PROVIDER_LENGTH) {
+      if (provider == null
+          || provider.length() > MAX_PROVIDER_LENGTH
+          || !PROVIDER_NAME.matcher(provider).matches()) {
         throw new IllegalArgumentException(
             "nms.routing.providers."
                 + channel
-                + " must name a provider of 1 to "
+                + " must be 1 to "
                 + MAX_PROVIDER_LENGTH
-                + " characters");
+                + " characters of a-z, 0-9, and '-', e.g. sim-email");
       }
     }
   }
