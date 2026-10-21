@@ -78,7 +78,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 - `202` on a new submission, `200` on an idempotent replay (same key, same payload) with the same body.
 - Limits: `recipients` 1..100 with distinct `userId` (max 64), `eventId` <= 128, `type` <= 64, `subject` <= 200, `body` <= 5000, `Idempotency-Key` <= 128. `channels`, when given, is a non-empty list of distinct channels; omit it to use preferences.
 - Timestamps: ISO-8601 with offset or zone (e.g. `2026-10-21T10:00:00Z`), years 1..9999, stored at microsecond precision. Unknown properties (including `sourceSystem`) are ignored.
-- Keys are honored for `nms.idempotency.retention` (default `7d`, env `NMS_IDEMPOTENCY_RETENTION`). Validation runs before the key lookup, so a retry sent after the original's `expiresAt` gets 4221, not the replay.
+- Keys are honored for `nms.idempotency.retention` (default `7d`, env `NMS_IDEMPOTENCY_RETENTION`). A retry of an accepted request replays even after its `expiresAt` has passed: time rules apply to new submissions only.
 
 ```json
 {
@@ -402,7 +402,7 @@ sequenceDiagram
     end
 ```
 
-One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Order inside the transaction: look up the key (live record: replay or 409), check recipients (unknown: 422, nothing written), claim the key (insert, or conditional update of an expired record), then notifications. Rejections after authentication (400, 409, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes (e.g. `codes 4004,4003`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
+One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Order of checks: 400-class validation (all field errors together), then inside the transaction look up the key (live record: same hash replays with 200, different hash is 409), then for new submissions only the time rules (4221, 4222) and recipients (4223); nothing is written on a rejection. Then claim the key (insert, or conditional update of an expired record), then notifications. Rejections after authentication (400, 409, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes (e.g. `codes 4004,4003`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
 
 ### Deliver
 
