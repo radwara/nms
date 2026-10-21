@@ -76,6 +76,9 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 - Each recipient carries its own optional `channels`. When absent, the recipient's enabled channels from the directory are used. Contact addresses always come from the directory, never the request.
 - One notification is created per recipient. All notifications from one request share an internal `submissionId` (not exposed).
 - `202` on a new submission, `200` on an idempotent replay (same key, same payload) with the same body.
+- Limits: `recipients` 1..100 with distinct `userId` (max 64), `eventId` <= 128, `type` <= 64, `subject` <= 200, `body` <= 5000, `Idempotency-Key` <= 128. `channels`, when given, is a non-empty list of distinct channels; omit it to use preferences.
+- Timestamps: ISO-8601 with offset or zone (e.g. `2026-10-21T10:00:00Z`), years 1..9999, stored at microsecond precision. Unknown properties (including `sourceSystem`) are ignored, also by the idempotency hash.
+- Keys are honored for `nms.idempotency.retention` (default `7d`, env `NMS_IDEMPOTENCY_RETENTION`). A retry of an accepted request replays even after its `expiresAt` has passed: time rules apply to new submissions only.
 
 ```json
 {
@@ -151,7 +154,7 @@ Every error, including authentication failures raised before any controller, use
 
 - All validation errors are returned together: validation collects them (`ApiErrors`) and throws once.
 - 400 checks run before 422 checks: 422 errors are returned only when there are no 400 errors (semantic checks on malformed input are noise).
-- Request bodies bind leniently (enums and timestamps as strings), so one validator reports every field instead of the JSON parser failing on the first. A JSON value of the wrong type is 4003 with its path; unparseable JSON is 4002.
+- Request bodies bind leniently (enums and timestamps as strings), so one validator reports every field instead of the JSON parser failing on the first. A JSON value of the wrong type is 4003 with its path; unparseable JSON, or a body of the wrong shape at the root (no path to name), is 4002.
 - Submitted values are never echoed back, and never logged: unexpected errors are logged by exception type and stack only.
 - `code` is a stable contract shared across subsystems; `message` may change.
 - Framework errors without a specific code keep their HTTP status; `code` is `status * 10` if that code exists, else 5000 for 5xx and 4000 for any other status. The same rule covers the container's `/error` page (`sendError`, exceptions in filters, direct requests: 404).
@@ -161,7 +164,7 @@ Every error, including authentication failures raised before any controller, use
 |---|---|---|
 | 4000 | 400 | Bad request without a specific code (e.g. dot segments in the path, malformed HTTP framing); generic code for other statuses without one |
 | 4001 | 400 | Required header missing |
-| 4002 | 400 | Malformed JSON |
+| 4002 | 400 | Malformed JSON, or a body of the wrong shape at the root (e.g. an array instead of an object) |
 | 4003 | 400 | Invalid field value or type |
 | 4004 | 400 | Required field missing |
 | 4005 | 400 | Too many recipients (max 100) |
@@ -172,6 +175,8 @@ Every error, including authentication failures raised before any controller, use
 | 4050 | 405 | Method not allowed (`Allow` header set) |
 | 4060 | 406 | Not acceptable (`Accept` cannot be satisfied) |
 | 4091 | 409 | Idempotency key reused with a different payload |
+| 4092 | 409 | Request with this Idempotency-Key is still in progress: another request holds the key past the lock wait and short replay retries. `Retry-After: 1` |
+| 4130 | 413 | Payload too large: JSON body over 64 KB (also other Jackson stream limits, e.g. nesting depth) |
 | 4151 | 415 | Unsupported content type |
 | 4221 | 422 | `expiresAt` is in the past |
 | 4222 | 422 | `scheduledAt` is after `expiresAt` |
@@ -255,7 +260,7 @@ Seeded recipients:
 |---|---|---|
 | `id` | bigint PK | |
 | `source_system`, `idempotency_key` | varchar(64), varchar(128) | Unique together. Longer keys rejected (4003) |
-| `request_hash` | char(64) | SHA-256 of the canonical parsed request (not raw bytes, so whitespace and key order do not cause false conflicts) |
+| `request_hash` | char(64) | SHA-256 of the canonical validated request: recognised fields only, null = absent, timestamps as UTC instants, recipient and channel order kept. Unknown properties, whitespace, and key order cannot cause false conflicts |
 | `submission_id` | uuid | Links to the notifications created |
 | `created_at`, `expires_at` | timestamp | Kept 7 days. Lookups ignore expired rows; an expired row is replaced in the same transaction via a conditional update. No purge job; purge is the production path |
 
@@ -385,21 +390,33 @@ sequenceDiagram
     participant I as Intake
     participant D as Database
     S->>A: POST /notifications (X-API-Key, Idempotency-Key)
-    A->>A: authenticate, validate
-    A->>I: submit
-    I->>D: insert IdempotencyRecord (unique sourceSystem + key)
-    alt key exists, same hash
-        I->>D: audit DUPLICATE_SUBMISSION
-        I-->>S: 200 + original notifications
-    else key exists, different hash
+    A->>A: authenticate; validate 400-class (all field errors at once)
+    A->>I: submit (new transaction)
+    I->>D: look up live IdempotencyRecord (sourceSystem + key)
+    alt live record, same hash
+        I->>D: audit DUPLICATE_SUBMISSION per notification
+        I-->>S: 200 + original notifications (request order)
+    else live record, different hash
         I-->>S: 409 / 4091
-    else new
-        I->>D: per recipient: Notification, routed Deliveries (PENDING), audit ACCEPTED, ROUTED, QUEUED
-        I-->>S: 202 + notifications
+    else no live record
+        I->>D: time rules (4221, 4222) and recipient existence (4223)
+        alt any violation
+            I-->>S: 422, all of them; nothing written
+        else accepted
+            I->>D: claim key: insert record, or conditional update of the expired one
+            I->>D: insert Notifications (batched), flush
+            I->>D: audit ACCEPTED per notification
+            I->>D: route the submission once (Deliveries, ROUTED, QUEUED; #9)
+            I-->>S: 202 + notifications (after commit)
+        end
     end
 ```
 
-One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Validation failures after authentication are audited as `REJECTED` in a separate transaction. "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
+One transaction per submission: the idempotency record, notifications, audits, and routing commit together or not at all; `submit` refuses to run inside a caller's transaction. The key is claimed before any content is written, so a concurrent request with the same key fails there: a unique-key violation (new key) or zero rows updated (expired key) is handled outside the failed transaction by re-reading and replaying the winner (or 409 if the payload differs). If the database lock wait times out because the winner is still running, intake re-reads up to 3 times (100, 200, 300 ms); still nothing committed returns 409 / 4092 with `Retry-After: 1`. Outcome logs are written after commit.
+
+Rejections after authentication (400, 409, 413, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes and the trace id (e.g. `codes 4004,4003; trace 8f3c...`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
+
+Replay reads only `(recipientId, id)` pairs by `submissionId` (no entity loads) and writes one `DUPLICATE_SUBMISSION` per notification. Trade-off: a replay of 100 recipients is 100 audit inserts (batched), in exchange for every notification's own history and duplicate count (status `duplicateSubmissions`, #11) being one indexed lookup. One event per submission would need a join on `submissionId` for every status read.
 
 ### Deliver
 
@@ -457,7 +474,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 - Paths whose raw URI has `.` or `..` segments (including `%2e` and `..;x` forms) are rejected with 400 / 4000 before authentication, so the path a filter checks is the path the client sent.
 - Failed authentication is logged at DEBUG (ids only), so a flood of bad credentials cannot flood the logs. Configuring a documented demo credential logs a WARN at startup.
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
-- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation.
+- Input limits: JSON bodies max 64 KB (413 / 4130, enforced while parsing, so chunked bodies are bounded too), max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
 - Secrets come from environment variables; nothing secret is committed.
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
@@ -481,12 +498,13 @@ What to alert on:
 
 | Concern | Prototype | Production |
 |---|---|---|
-| Database | H2 | PostgreSQL |
+| Database | H2 | PostgreSQL; set `reWriteBatchedInserts=true` on the JDBC URL so Hibernate's insert batches become multi-row inserts |
 | Work claiming | Conditional update on `id`, `status`, and `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
 | Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
+| Lock waits | H2 `LOCK_TIMEOUT` (default 2 s) triggers 409/4092 for a racing retry | Set PostgreSQL `lock_timeout` (it waits forever by default) so the 4092 path engages |
 
 ## Out of scope
 

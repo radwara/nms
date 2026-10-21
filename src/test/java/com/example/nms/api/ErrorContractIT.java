@@ -56,7 +56,7 @@ class ErrorContractIT {
   }
 
   @Test
-  void wrongJsonShapeAtTheRootIs4003WithoutField() {
+  void wrongJsonShapeAtTheRootIs4002WithoutField() {
     MvcTestResult result =
         mvc.post()
             .uri("/api/v1/test/typed")
@@ -65,7 +65,7 @@ class ErrorContractIT {
             .content("[1, 2]")
             .exchange();
 
-    assertSingleError(result, 400, 4003, null);
+    assertSingleError(result, 400, 4002, null);
   }
 
   @Test

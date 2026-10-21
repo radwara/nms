@@ -28,11 +28,18 @@ management:
         include: health,info,prometheus
 
 logging:
+  level:
+    # Hibernate logs JDBC errors with their message, which quotes column values (e.g. a duplicate
+    # key). The exception still propagates and is logged redacted where it is handled.
+    org.hibernate.orm.jdbc.error: OFF
   structured:
     format:
       console: ecs
 
 nms:
+  idempotency:
+    # How long an accepted Idempotency-Key is honored (ADR-0002); afterwards it may create a new submission.
+    retention: ${NMS_IDEMPOTENCY_RETENTION:7d}
   security:
     # keyId:sourceSystem:sha256hex[,...] (ADR-0001). Empty: every /api request is rejected with 401.
     api-keys: ${NMS_API_KEYS:}

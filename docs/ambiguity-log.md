@@ -23,6 +23,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-15 | Severity vs priority | Both required (spec 4.1), no defaults. Severity drives routing; priority drives worker claim order under backlog. Engineer decision (#2) | Accepted |
 | A-16 | Schedule time in the past / expiration in the past | Past schedule = send now. Past expiration = reject 422 | Accepted |
 | A-17 | Who are the API callers, how are they authenticated? | API key per source system (from config). `sourceSystem` is taken from the key, not trusted from the body  (ADR-0001) | Accepted |
+| A-18 | Spec 4.1 lists one "notification identifier" for a request with 1..n recipients | The spec's "notification" is our submission (one request). Identifiers are per recipient by design: one `notificationId` each; the shared `submissionId` stays internal (#8, ADR-0002) | Accepted |
 
 ## Status (4.2)
 

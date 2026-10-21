@@ -75,4 +75,9 @@ public class IdempotencyRecord {
   public Instant getExpiresAt() {
     return expiresAt;
   }
+
+  /** Honored until {@code expiresAt}; from then on the key may be reused by a new submission. */
+  public boolean isLiveAt(Instant now) {
+    return expiresAt.isAfter(now);
+  }
 }
