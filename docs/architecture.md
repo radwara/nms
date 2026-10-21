@@ -181,7 +181,7 @@ erDiagram
     RECIPIENT ||--o{ NOTIFICATION : "recipientId"
 ```
 
-Conventions: timestamps are UTC instants; persisted timestamps come from an injected `Clock` truncated to microseconds (database precision); ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use identity keys; enums are stored as strings.
+Conventions: timestamps are UTC instants; persisted timestamps come from an injected `Clock` truncated to microseconds (database precision); ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use generated bigint keys (identity; a pooled sequence for `audit_event` so its inserts batch); enums are stored as strings.
 
 ### Directory (seeded, read-only)
 
@@ -294,7 +294,7 @@ No status column: overall status is derived from deliveries.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | bigint PK | |
+| `id` | bigint PK | From `audit_event_seq` (increment 50, matching the entity allocation size) so inserts batch |
 | `source_system` | varchar(64) | |
 | `notification_id` | uuid null, indexed | Null for `REJECTED` requests (spec 4.9). Only authenticated requests are audited; written in its own transaction because the submission rolled back |
 | `delivery_id` | uuid null | |

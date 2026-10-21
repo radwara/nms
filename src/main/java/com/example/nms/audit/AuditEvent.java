@@ -7,6 +7,7 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.SequenceGenerator;
 import java.time.Instant;
 import java.util.UUID;
 import org.hibernate.annotations.Immutable;
@@ -19,8 +20,13 @@ import org.hibernate.annotations.Immutable;
 @Immutable
 public class AuditEvent {
 
+  /** Pooled sequence (allocation matches the sequence increment) so inserts can be batched. */
   @Id
-  @GeneratedValue(strategy = GenerationType.IDENTITY)
+  @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "audit_event_seq")
+  @SequenceGenerator(
+      name = "audit_event_seq",
+      sequenceName = "audit_event_seq",
+      allocationSize = 50)
   private Long id;
 
   private String sourceSystem;
