@@ -190,18 +190,114 @@ erDiagram
     RECIPIENT ||--o{ NOTIFICATION : "recipientId"
 ```
 
-| Entity | Key fields | Notes |
-|---|---|---|
-| `IdempotencyRecord` | `sourceSystem`, `idempotencyKey` (unique together), `requestHash`, `submissionId`, `expiresAt` | Separate table so keys can expire (7 days) and be purged |
-| `Notification` | `id`, `submissionId`, `sourceSystem`, `eventId`, `type`, `severity`, `priority`, `recipientId`, `subject`, `body`, `scheduledAt`, `expiresAt`, `createdAt` | One recipient. Overall status is derived, never stored |
-| `Delivery` | `id`, `notificationId`, `channel` (unique together), `status`, `attemptCount`, `nextAttemptAt`, `claimedAt`, `providerMessageId`, `failureReason`, `sentAt`, `finalizedAt`, `version` | Unit of work for the worker. `version` for optimistic locking |
-| `DeliveryAttempt` | `deliveryId`, `attemptNo` (unique together), `outcome`, `errorCategory`, `providerCode`, `startedAt`, `durationMs` | One row per send call; history is never overwritten |
-| `ProviderEvent` | `provider`, `eventKey` (unique together), `providerMessageId`, `rawStatus`, `mappedStatus`, `matched`, `receivedAt` | Callback log for dedupe and late matching |
-| `AuditEvent` | `notificationId`, `deliveryId`, `type`, `detail`, `occurredAt` | Append-only. No message content or contact details |
-| `Recipient` | `id`, `email`, `phone` | Seeded directory |
-| `ChannelPreference` | `recipientId`, `channel`, `enabled` | Seeded; disabled = opted out |
+Conventions: timestamps are UTC instants; ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use identity keys; enums are stored as strings.
 
-API keys and webhook tokens are configuration, not tables (ADR-0001).
+### Directory (seeded, read-only)
+
+`recipient`: the only table holding contact details.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | varchar(64) PK | Caller's user id |
+| `email` | varchar(254) null | |
+| `phone` | varchar(20) null | E.164 |
+
+`channel_preference`
+
+| Column | Type | Notes |
+|---|---|---|
+| `recipient_id`, `channel` | PK | |
+| `enabled` | boolean | `false` = opted out |
+
+A missing preference row means **enabled** (opt-out model, usual for transactional alerts). A channel is usable only if enabled and the recipient has an address for it.
+
+### Intake
+
+`idempotency_record`
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `source_system`, `idempotency_key` | varchar(64), varchar(128) | Unique together. Longer keys rejected (4003) |
+| `request_hash` | char(64) | SHA-256 of the body; detects same key with different payload |
+| `submission_id` | uuid | Links to the notifications created |
+| `created_at`, `expires_at` | timestamp | `expires_at` indexed for the purge job (7 days) |
+
+`notification`: one per recipient.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | Returned as `notificationId` |
+| `submission_id` | uuid, indexed | Groups notifications from one request |
+| `source_system` | varchar(64) | From the API key; used for tenant-scoped reads |
+| `event_id`, `type` | varchar(128), varchar(64) | |
+| `severity`, `priority` | varchar(16) | Required (spec 4.1) |
+| `recipient_id` | FK `recipient` | |
+| `requested_channels` | varchar(64) null | As requested, e.g. `SMS,EMAIL`; null = preferences. Explains requested vs selected |
+| `subject`, `body` | varchar(200), varchar(5000) | Sensitive; stored only here, plaintext in the prototype |
+| `scheduled_at`, `expires_at` | timestamp null | |
+| `created_at` | timestamp | |
+
+No status column: overall status is derived from deliveries.
+
+### Delivery
+
+`delivery`: one per (notification, channel); the worker's unit of work.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid PK | Also the provider idempotency key |
+| `notification_id`, `channel` | FK, varchar(16) | Unique together |
+| `provider` | varchar(32) | e.g. `sim-email`; separate from channel so providers can change per channel |
+| `status` | varchar(20) | `PENDING`, `SENDING`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `BOUNCED`, `FAILED`, `EXPIRED` |
+| `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION` |
+| `attempt_count` | int | |
+| `next_attempt_at` | timestamp null | Due time; null once final. Indexed with `status` for polling |
+| `claimed_at` | timestamp null | Lease start; stale `SENDING` rows are reclaimable |
+| `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
+| `failure_reason` | varchar(32) null | e.g. `INVALID_RECIPIENT`, `BOUNCED` |
+| `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
+| `version` | bigint | Optimistic lock; only one claim succeeds |
+
+`delivery_attempt`: one per send call, never updated.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `delivery_id`, `attempt_no` | FK, int | Unique together |
+| `outcome` | varchar(20) | `ACCEPTED`, `RETRYABLE_FAILURE`, `FINAL_FAILURE` |
+| `error_category` | varchar(24) null | `TRANSIENT`, `TIMEOUT`, `RATE_LIMITED`, `PERMANENT_REJECTION`, `INVALID_RECIPIENT`, `AUTH_ERROR` |
+| `provider_code` | varchar(32) null | Vendor's raw code, e.g. `429` |
+| `started_at`, `duration_ms` | timestamp, int | |
+
+`provider_event`: callback log.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `provider`, `event_key` | varchar(32), varchar(160) | Unique together: duplicate callbacks are rejected here. Email: vendor event id. SMS: `messageSid` + status |
+| `provider_message_id` | varchar(128), indexed | Matches the delivery |
+| `raw_status`, `mapped_status` | varchar(32), varchar(20) null | Null mapped status = ignored (e.g. `open`) |
+| `reason_code` | varchar(32) null | Mapped code; raw vendor text not stored |
+| `delivery_id` | uuid null | Null = unmatched; set when the `SENT` write commits |
+| `occurred_at`, `received_at` | timestamp | |
+
+### Audit
+
+`audit_event`: append-only; code never updates or deletes.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | bigint PK | |
+| `source_system` | varchar(64) | |
+| `notification_id` | uuid null, indexed | Null for `REJECTED` requests, which create no notification (spec 4.9) |
+| `delivery_id` | uuid null | |
+| `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `BOUNCED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
+| `channel` | varchar(16) null | |
+| `detail` | varchar(256) | Codes and reasons only; never content or addresses |
+| `occurred_at` | timestamp | |
+
+API keys and webhook tokens are configuration, not tables (ADR-0001). Production path for content: encryption at rest and clearing `body` once all deliveries are final.
 
 ## Routing
 
