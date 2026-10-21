@@ -1,6 +1,6 @@
 # ADR-0004: Database-backed delivery queue with a polling worker
 
-- Status: Proposed (2026-10-20)
+- Status: Accepted (2026-10-20)
 - Related: SC-1, FR-4.2, NFR-2, NFR-4
 
 ## Context
@@ -20,9 +20,11 @@ Delivery must be asynchronous, survive restarts, support scheduled sends and del
 The `delivery` table is the queue.
 
 - A scheduled worker polls for due rows (`PENDING` or `RETRY_SCHEDULED`, `nextAttemptAt <= now`), ordered by priority then due time, in small batches.
-- A row is claimed with a conditional update (`status = SENDING` where id and `version` match). Only one worker wins.
+- One single-threaded poller. A row is claimed with a conditional update (`status = SENDING`, `claimed_at = now` where id and due status match), committed before the send. Only one claimer wins.
+- Every outcome write is conditional on `status = SENDING` and the claim's `claimed_at`, so a slow worker whose lease was reclaimed cannot overwrite newer state.
 - Scheduling is `nextAttemptAt = scheduledAt`; a retry is `nextAttemptAt = now + backoff`.
-- A row stuck in `SENDING` past a lease is reclaimable after a crash; the resend reuses the same provider idempotency key.
+- The lease is longer than the provider timeout. A row stuck in `SENDING` past the lease is reclaimable after a crash; the resend reuses the same provider idempotency key (`deliveryId`).
+- Priority is copied onto the delivery as a number so the poll sorts correctly with an index on `(status, priority, next_attempt_at)`.
 
 ## Consequences
 

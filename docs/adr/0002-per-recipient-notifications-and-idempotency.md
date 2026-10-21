@@ -20,11 +20,11 @@ Spec 4.1 requires a request to accept one or more recipients. Spec 4.4 requires 
 **B.**
 
 - `recipients` is a list of `{ userId, channels? }`, max 100. Each entry becomes one `Notification`.
-- `Idempotency-Key` header is required, scoped per source system. Stored in `IdempotencyRecord` with a SHA-256 hash of the request body and the `submissionId`.
+- `Idempotency-Key` header is required, scoped per source system. Stored in `IdempotencyRecord` with a SHA-256 hash of the canonical parsed request (whitespace and key order do not matter) and the `submissionId`.
 - Same key, same hash: `200` with the original notification ids, `DUPLICATE_SUBMISSION` audited on each. Same key, different hash: `409 / 4091`.
 - The idempotency record and all notifications are written in one transaction.
-- Any unknown recipient rejects the whole request (`422 / 4223`). One key always maps to one outcome.
-- Keys are honored for 7 days (configurable), then purged; afterwards the key may be reused.
+- Any unknown recipient rejects the whole request (`422 / 4223`). One key maps to at most one accepted submission; rejections are not stored, so a corrected retry with the same key can succeed.
+- Keys are honored for 7 days (configurable); lookups ignore expired records, and a daily job purges them.
 - `submissionId` is internal: used for replay and audit grouping, not returned.
 
 ## Discussion
@@ -33,6 +33,7 @@ Spec 4.1 requires a request to accept one or more recipients. Spec 4.4 requires 
 - Engineer proposed one notification per user for simpler tracking, storage, and processing. Adopted; spec still satisfied because the API accepts many.
 - Engineer questioned returning a grouping id the caller cannot use. Made internal.
 - Engineer found the request still applied one `channels` list to all recipients. Moved `channels` onto each recipient.
+- Independent design review suggested returning `submissionId` so a multi-recipient alert has one handle. Engineer kept it internal: no API accepts it, and each recipient has its own id by design.
 
 Full thread: #2.
 
