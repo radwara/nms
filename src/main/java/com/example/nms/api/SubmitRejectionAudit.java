@@ -2,6 +2,7 @@ package com.example.nms.api;
 
 import com.example.nms.audit.AuditRecorder;
 import com.example.nms.observability.RedactedThrowable;
+import com.example.nms.observability.TraceIds;
 import com.example.nms.security.SourceSystem;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
@@ -55,7 +56,7 @@ class SubmitRejectionAudit {
     List<Integer> codes = errors.stream().map(e -> e.code().code()).distinct().toList();
     log.info("Submission rejected with codes {} for source system {}", codes, source.name());
     try {
-      audit.rejected(source.name(), codes);
+      audit.rejected(source.name(), codes, TraceIds.current());
     } catch (RuntimeException e) {
       log.error("Could not audit a rejected submission", RedactedThrowable.of(e));
     }

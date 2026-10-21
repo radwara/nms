@@ -51,11 +51,13 @@ public class AuditRecorder {
 
   /**
    * A rejected request (no notification exists). Own transaction, because the request's work, if
-   * any, rolled back. {@code detail} lists the distinct error codes.
+   * any, rolled back. {@code detail} lists the distinct error codes and the trace id, so the event
+   * can be matched to the request's logs, e.g. {@code codes 4004,4003; trace 8f3c...}.
    */
   @Transactional(propagation = Propagation.REQUIRES_NEW)
-  public void rejected(String sourceSystem, Collection<Integer> errorCodes) {
-    String detail =
+  public void rejected(String sourceSystem, Collection<Integer> errorCodes, String traceId) {
+    String trace = traceId == null ? "" : "; trace " + traceId;
+    String codes =
         errorCodes.stream()
             .distinct()
             .map(String::valueOf)
@@ -67,11 +69,11 @@ public class AuditRecorder {
             null,
             AuditEventType.REJECTED,
             null,
-            truncate(detail),
+            truncate(codes, MAX_DETAIL_LENGTH - trace.length()) + trace,
             clock.instant().truncatedTo(ChronoUnit.MICROS)));
   }
 
-  private static String truncate(String detail) {
-    return detail.length() <= MAX_DETAIL_LENGTH ? detail : detail.substring(0, MAX_DETAIL_LENGTH);
+  private static String truncate(String text, int maxLength) {
+    return text.length() <= maxLength ? text : text.substring(0, maxLength);
   }
 }

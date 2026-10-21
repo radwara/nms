@@ -44,18 +44,26 @@ class SubmitRejectionAuditIT {
     body.put("subject", "SECRET-SUBJECT-" + "s".repeat(200));
     body.remove("eventId");
 
-    assertThat(post(OTHER1, newKey(), body.toString())).hasStatus(400);
+    MvcTestResult result = post(OTHER1, newKey(), body.toString());
+    assertThat(result).hasStatus(400);
 
     assertThat(rejections())
-        .containsExactly(Map.of("source_system", "other-app", "detail", "codes 4004,4003"));
+        .containsExactly(
+            Map.of(
+                "source_system",
+                "other-app",
+                "detail",
+                "codes 4004,4003; trace " + traceId(result)));
   }
 
   @Test
   void malformedJsonIsAudited() {
-    assertThat(post(DEMO1, newKey(), "{\"eventId\": ")).hasStatus(400);
+    MvcTestResult result = post(DEMO1, newKey(), "{\"eventId\": ");
+    assertThat(result).hasStatus(400);
 
     assertThat(rejections())
-        .containsExactly(Map.of("source_system", "demo-app", "detail", "codes 4002"));
+        .containsExactly(
+            Map.of("source_system", "demo-app", "detail", "codes 4002; trace " + traceId(result)));
   }
 
   @Test
@@ -65,18 +73,22 @@ class SubmitRejectionAuditIT {
     assertThat(post(DEMO1, key, body.toString())).hasStatus(202);
     body.put("subject", "Changed");
 
-    assertThat(post(DEMO1, key, body.toString())).hasStatus(409);
+    MvcTestResult result = post(DEMO1, key, body.toString());
+    assertThat(result).hasStatus(409);
 
     assertThat(rejections())
-        .containsExactly(Map.of("source_system", "demo-app", "detail", "codes 4091"));
+        .containsExactly(
+            Map.of("source_system", "demo-app", "detail", "codes 4091; trace " + traceId(result)));
   }
 
   @Test
   void semanticErrorsAreAuditedAlthoughNothingWasPersisted() {
-    assertThat(post(DEMO1, newKey(), valid("user-ok", "nobody").toString())).hasStatus(422);
+    MvcTestResult result = post(DEMO1, newKey(), valid("user-ok", "nobody").toString());
+    assertThat(result).hasStatus(422);
 
     assertThat(rejections())
-        .containsExactly(Map.of("source_system", "demo-app", "detail", "codes 4223"));
+        .containsExactly(
+            Map.of("source_system", "demo-app", "detail", "codes 4223; trace " + traceId(result)));
     assertThat(jdbc.queryForObject("select count(*) from notification", Integer.class)).isZero();
     assertThat(jdbc.queryForObject("select count(*) from idempotency_record", Integer.class))
         .isZero();
@@ -111,6 +123,10 @@ class SubmitRejectionAuditIT {
         .contentType(MediaType.APPLICATION_JSON)
         .content(body)
         .exchange();
+  }
+
+  private static String traceId(MvcTestResult result) {
+    return result.getResponse().getHeader("X-Trace-Id");
   }
 
   /** REJECTED events: no notification, no delivery, no channel; source system and codes only. */

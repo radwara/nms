@@ -35,7 +35,7 @@ class AuditRecorderIT {
         .executeWithoutResult(
             status -> {
               recorder.accepted("demo-app", UUID.randomUUID(), Instant.now());
-              recorder.rejected("demo-app", List.of(4223));
+              recorder.rejected("demo-app", List.of(4223), "trace-1");
               status.setRollbackOnly();
             });
 
@@ -53,15 +53,19 @@ class AuditRecorderIT {
   }
 
   @Test
-  void rejectedDetailListsDistinctCodesWithinTheColumnLimit() {
-    recorder.rejected("demo-app", List.of(4004, 4003, 4004));
-    recorder.rejected("demo-app", IntStream.range(1000, 1200).boxed().toList());
+  void rejectedDetailListsDistinctCodesAndTheTraceIdWithinTheColumnLimit() {
+    String traceId = "0123456789abcdef0123456789abcdef";
+    recorder.rejected("demo-app", List.of(4004, 4003, 4004), traceId);
+    recorder.rejected("demo-app", IntStream.range(1000, 1200).boxed().toList(), traceId);
+    recorder.rejected("demo-app", List.of(4002), null);
 
     List<String> details =
         jdbc.queryForList("select detail from audit_event order by id", String.class);
-    assertThat(details.get(0)).isEqualTo("codes 4004,4003");
+    assertThat(details.get(0)).isEqualTo("codes 4004,4003; trace " + traceId);
     assertThat(details.get(1))
         .hasSize(AuditRecorder.MAX_DETAIL_LENGTH)
-        .startsWith("codes 1000,1001");
+        .startsWith("codes 1000,1001")
+        .endsWith("; trace " + traceId);
+    assertThat(details.get(2)).isEqualTo("codes 4002");
   }
 }
