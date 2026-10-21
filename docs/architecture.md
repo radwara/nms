@@ -122,24 +122,18 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 
 ### Provider callbacks
 
-Each provider adapter owns its payload format and the mapping to our statuses. Simulated formats follow the shape of common vendors.
+One generic callback format for all simulated providers. We pass our `deliveryId` with every send (real vendors support this: SendGrid custom args, Twilio per-message callback URL), so callbacks match on our own id.
 
-`POST /webhooks/email` (batched, SendGrid-style):
-
-```json
-[
-  { "eventId": "e-01", "messageId": "em-123", "event": "delivered", "timestamp": "..." },
-  { "eventId": "e-02", "messageId": "em-456", "event": "bounce", "reason": "mailbox unavailable", "timestamp": "..." }
-]
-```
-
-`POST /webhooks/sms` (single event, Twilio-style; dedupe key is `messageSid` + `messageStatus`):
+`POST /webhooks/{provider}`, header `X-Webhook-Token`:
 
 ```json
-{ "messageSid": "SM-789", "messageStatus": "undelivered", "errorCode": "30003", "timestamp": "..." }
+{ "deliveryId": "d-5e1...", "providerMessageId": "em-123", "event": "BOUNCED", "reasonCode": "MAILBOX_UNAVAILABLE", "occurredAt": "..." }
 ```
 
-Response: `200` with no body for processed, duplicate, ignored, and unmatched events, so vendors do not retry them. Vendor free-text reasons are mapped to reason codes; raw text is not stored because it can contain addresses.
+- `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`.
+- Dedupe by state: only a `SENT` delivery changes. Repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`.
+- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged and counted.
+- Mapping real vendor payloads (event names, batching, signatures) is production work inside each provider adapter.
 
 ### Errors
 
@@ -167,10 +161,9 @@ Every error, including authentication failures raised before any controller, use
 | 4004 | 400 | Required field missing |
 | 4005 | 400 | Too many recipients (max 100) |
 | 4011 | 401 | API key or webhook token missing |
-| 4012 | 401 | API key or webhook token invalid (expired and revoked are deliberately indistinguishable) |
+| 4012 | 401 | API key or webhook token invalid |
 | 4041 | 404 | Notification not found (also returned for another source system's notification) |
 | 4091 | 409 | Idempotency key reused with a different payload |
-| 4092 | 409 | Same idempotency key is still being processed |
 | 4151 | 415 | Unsupported content type |
 | 4221 | 422 | `expiresAt` is in the past |
 | 4222 | 422 | `scheduledAt` is after `expiresAt` |
@@ -183,8 +176,6 @@ Every error, including authentication failures raised before any controller, use
 erDiagram
     IDEMPOTENCY_RECORD ||--|{ NOTIFICATION : "submissionId"
     NOTIFICATION ||--|{ DELIVERY : "one per channel"
-    DELIVERY ||--o{ DELIVERY_ATTEMPT : "one per send call"
-    DELIVERY ||--o{ PROVIDER_EVENT : "callbacks"
     NOTIFICATION ||--o{ AUDIT_EVENT : "history"
     RECIPIENT ||--o{ CHANNEL_PREFERENCE : "per channel"
     RECIPIENT ||--o{ NOTIFICATION : "recipientId"
@@ -219,9 +210,9 @@ A missing preference row means **enabled** (opt-out model, usual for transaction
 |---|---|---|
 | `id` | bigint PK | |
 | `source_system`, `idempotency_key` | varchar(64), varchar(128) | Unique together. Longer keys rejected (4003) |
-| `request_hash` | char(64) | SHA-256 of the body; detects same key with different payload |
+| `request_hash` | char(64) | SHA-256 of the canonical parsed request (not raw bytes, so whitespace and key order do not cause false conflicts) |
 | `submission_id` | uuid | Links to the notifications created |
-| `created_at`, `expires_at` | timestamp | `expires_at` indexed for the purge job (7 days) |
+| `created_at`, `expires_at` | timestamp | Lookups ignore expired rows; `expires_at` indexed for the purge job (7 days) |
 
 `notification`: one per recipient.
 
@@ -249,38 +240,16 @@ No status column: overall status is derived from deliveries.
 | `id` | uuid PK | Also the provider idempotency key |
 | `notification_id`, `channel` | FK, varchar(16) | Unique together |
 | `provider` | varchar(32) | e.g. `sim-email`; separate from channel so providers can change per channel |
-| `status` | varchar(20) | `PENDING`, `SENDING`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `BOUNCED`, `FAILED`, `EXPIRED` |
+| `status` | varchar(20) | `PENDING`, `SENDING`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED` |
+| `priority` | smallint | Copied from the notification (HIGH=0, NORMAL=1, LOW=2) so the poll sorts correctly without a join |
 | `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION` |
 | `attempt_count` | int | |
-| `next_attempt_at` | timestamp null | Due time; null once final. Indexed with `status` for polling |
-| `claimed_at` | timestamp null | Lease start; stale `SENDING` rows are reclaimable |
+| `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
+| `claimed_at` | timestamp null | Lease start and claim token. Every outcome write is conditional on `status = SENDING` and this value; stale claims are reclaimable |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
-| `failure_reason` | varchar(32) null | e.g. `INVALID_RECIPIENT`, `BOUNCED` |
+| `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
-| `version` | bigint | Optimistic lock; only one claim succeeds |
-
-`delivery_attempt`: one per send call, never updated.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `delivery_id`, `attempt_no` | FK, int | Unique together |
-| `outcome` | varchar(20) | `ACCEPTED`, `RETRYABLE_FAILURE`, `FINAL_FAILURE` |
-| `error_category` | varchar(24) null | `TRANSIENT`, `TIMEOUT`, `RATE_LIMITED`, `PERMANENT_REJECTION`, `INVALID_RECIPIENT`, `AUTH_ERROR` |
-| `provider_code` | varchar(32) null | Vendor's raw code, e.g. `429` |
-| `started_at`, `duration_ms` | timestamp, int | |
-
-`provider_event`: callback log.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | bigint PK | |
-| `provider`, `event_key` | varchar(32), varchar(160) | Unique together: duplicate callbacks are rejected here. Email: vendor event id. SMS: `messageSid` + status |
-| `provider_message_id` | varchar(128), indexed | Matches the delivery |
-| `raw_status`, `mapped_status` | varchar(32), varchar(20) null | Null mapped status = ignored (e.g. `open`) |
-| `reason_code` | varchar(32) null | Mapped code; raw vendor text not stored |
-| `delivery_id` | uuid null | Null = unmatched; set when the `SENT` write commits |
-| `occurred_at`, `received_at` | timestamp | |
+| `version` | bigint | Optimistic lock for non-worker updates |
 
 ### Audit
 
@@ -290,11 +259,11 @@ No status column: overall status is derived from deliveries.
 |---|---|---|
 | `id` | bigint PK | |
 | `source_system` | varchar(64) | |
-| `notification_id` | uuid null, indexed | Null for `REJECTED` requests, which create no notification (spec 4.9) |
+| `notification_id` | uuid null, indexed | Null for `REJECTED` requests (spec 4.9). Only authenticated requests are audited; written in its own transaction because the submission rolled back |
 | `delivery_id` | uuid null | |
-| `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `BOUNCED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
+| `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `QUEUED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
 | `channel` | varchar(16) null | |
-| `detail` | varchar(256) | Codes and reasons only; never content or addresses |
+| `detail` | varchar(256) | Codes and reasons only (attempt number, error category, provider code); never content or addresses. Replaces a separate attempts table |
 | `occurred_at` | timestamp | |
 
 API keys and webhook tokens are configuration, not tables (ADR-0001). Production path for content: encryption at rest and clearing `body` once all deliveries are final.
@@ -324,13 +293,13 @@ stateDiagram-v2
     PENDING --> EXPIRED: past expiresAt
     RETRY_SCHEDULED --> EXPIRED: past expiresAt
     SENT --> DELIVERED: callback
-    SENT --> BOUNCED: callback (email)
-    SENT --> FAILED: callback
+    SENT --> FAILED: callback (incl. bounce)
 ```
 
 - `SENT` with no callback stays `SENT` indefinitely. That is the honest state.
 - After `SENT` nothing is resent; the vendor owns its own retries.
 - Final states never change. Late or duplicate callbacks are ignored and audited.
+- A claim that crashed after the vendor returned 200 but before `SENT` was written is resent on reclaim; the vendor dedupes on `deliveryId`. If it has since expired it is marked `EXPIRED` even though it may have been sent (documented limitation).
 
 ### Failure classification (send call)
 
@@ -343,7 +312,7 @@ stateDiagram-v2
 | `INVALID_RECIPIENT` | Bad address or number | `FAILED` |
 | `AUTH_ERROR` | Vendor rejects our credentials | `FAILED`, error log, metric (config problem, not delivery problem) |
 
-Retries: max 4 attempts (configurable), exponential backoff with full jitter, never scheduled past `expiresAt`.
+Retries: max 4 attempts (configurable), exponential backoff with full jitter. If the next attempt would fall after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`.
 
 ### Overall status (derived on read)
 
@@ -353,7 +322,7 @@ Retries: max 4 attempts (configurable), exponential backoff with full jitter, ne
 | Any `PENDING`, `SENDING`, `RETRY_SCHEDULED` | `IN_PROGRESS` |
 | Otherwise any `SENT` | `AWAITING_CONFIRMATION` |
 | All `DELIVERED` | `DELIVERED` |
-| Some `DELIVERED`, rest failed, bounced, or expired | `PARTIALLY_DELIVERED` |
+| Some `DELIVERED`, rest failed or expired | `PARTIALLY_DELIVERED` |
 | None delivered, all `EXPIRED` | `EXPIRED` |
 | None delivered, otherwise | `FAILED` |
 | No deliveries | `NOT_ROUTED` |
@@ -380,12 +349,12 @@ sequenceDiagram
     else key exists, different hash
         I-->>S: 409 / 4091
     else new
-        I->>D: per recipient: Notification, routed Deliveries (PENDING), audit events
+        I->>D: per recipient: Notification, routed Deliveries (PENDING), audit ACCEPTED, ROUTED, QUEUED
         I-->>S: 202 + notifications
     end
 ```
 
-One transaction per submission: the idempotency record and all notifications commit together or not at all.
+One transaction per submission: the idempotency record and all notifications commit together or not at all. The idempotency record is flushed first; a concurrent duplicate surfaces as a unique-key violation, handled outside the failed transaction by re-reading and replaying. Validation failures after authentication are audited as `REJECTED` in a separate transaction. "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
 
 ### Deliver
 
@@ -396,21 +365,22 @@ sequenceDiagram
     participant P as Provider adapter
     loop every poll interval
         W->>D: select due deliveries (PENDING / RETRY_SCHEDULED, nextAttemptAt <= now) by priority
-        W->>D: claim: status = SENDING where id and version match
+        W->>D: claim (committed): status = SENDING, claimed_at = now where id and status match
         W->>P: send (idempotency key = deliveryId)
         alt 200
-            W->>D: SENT + providerMessageId, apply any unmatched callbacks
+            W->>D: SENT + providerMessageId
         else retryable
             W->>D: RETRY_SCHEDULED, nextAttemptAt = now + backoff
         else final
             W->>D: FAILED + reason
         end
-        W->>D: DeliveryAttempt + audit events
+        W->>D: audit events (attempt, category, provider code)
     end
 ```
 
-- Claiming is a conditional update on `version`, so two workers can never send the same delivery.
-- A delivery stuck in `SENDING` longer than the lease (crash mid-send) becomes claimable again. The resend reuses the same provider idempotency key.
+- One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
+- Every outcome write is conditional on `status = SENDING` and the claim's `claimed_at`. A slow worker whose lease was reclaimed cannot overwrite the newer state.
+- The lease is longer than the provider timeout. A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 
 ### Callback
 
@@ -420,20 +390,19 @@ sequenceDiagram
     participant H as Webhook handler
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
-    H->>H: authenticate; adapter maps vendor event to our status
-    H->>D: insert ProviderEvent (unique provider + eventKey)
-    alt duplicate event
-        H-->>V: 200 (ignored)
-    else delivery found and SENT
-        H->>D: final status + finalizedAt + audit
-        H-->>V: 200
-    else delivery not found yet
-        H->>D: keep ProviderEvent unmatched (applied when SENT commits)
-        H-->>V: 200
+    H->>H: authenticate, validate
+    H->>D: update delivery (final status, providerMessageId) where id = deliveryId and status in (SENDING, SENT)
+    alt one row updated
+        H->>D: audit DELIVERED or FAILED
+    else delivery already final
+        H->>D: audit CALLBACK_IGNORED
+    else unknown deliveryId
+        H->>H: log + metric
     end
+    H-->>V: 200
 ```
 
-Unmatched events cover the race where a vendor calls back before our `SENT` write commits.
+The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status. The worker's later `SENT` write is conditional on `status = SENDING` and updates nothing, so the final state stands.
 
 ## Security
 
@@ -450,14 +419,14 @@ Unmatched events cover the race where a vendor calls back before our `SENT` writ
 | Signal | Detail |
 |---|---|
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
-| Logs | Structured JSON; ids and outcome categories only |
+| Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health` (database, worker liveness) |
-| Metrics | `nms.notifications.accepted`, `nms.deliveries.outcome{channel,status}`, `nms.delivery.attempts{channel,category}`, `nms.deliveries.due` (backlog gauge), `nms.webhook.events{provider,result}`, `nms.auth.failures` |
+| Metrics | `nms.deliveries.outcome{channel,status}`, `nms.delivery.attempts{channel,category}`, `nms.deliveries.due` (backlog gauge) |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
-- Spike in unmatched or rejected webhook events: misconfiguration or forged callbacks.
+- Warnings for unknown-delivery or rejected webhook calls: misconfiguration or forged callbacks.
 
 ## Scaling path (not built)
 
@@ -465,7 +434,7 @@ What to alert on:
 |---|---|---|
 | Database | H2 | PostgreSQL |
 | Work claiming | Conditional update on `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
-| Throughput | One instance, worker thread pool | Horizontal instances; per-channel worker pools |
+| Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
 | Retention | Idempotency purge job | Partitioned audit tables, archival |
