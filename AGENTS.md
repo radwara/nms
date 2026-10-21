@@ -40,4 +40,13 @@ issue -> branch <type>/<issue>-<slug> -> tests from acceptance criteria -> imple
 
 ## Build and test
 
-To be filled in by the scaffold issue.
+```
+./mvnw verify                 # format check, compile (-Werror), unit + integration tests, coverage
+./mvnw spotless:apply         # fix formatting
+./mvnw spring-boot:run        # run on :8080 (in-memory H2)
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev   # file H2 + console at /h2-console
+```
+
+- Unit tests: `*Test` (surefire). Integration tests: `*IT` (failsafe, full Spring context).
+- Coverage report: `target/site/jacoco/index.html`.
+- Tests that need metrics endpoints use `@AutoConfigureMetrics` (Spring Boot disables metrics export in tests).

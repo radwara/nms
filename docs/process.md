@@ -24,23 +24,23 @@ issue (acceptance criteria) -> branch -> tests from criteria -> AI implements
 
 ## Independent review checkpoints
 
-A fresh-context reviewer (separate AI session with no access to the implementing conversation) critiques the work at each logical point. Findings and the engineer's disposition (accepted / rejected / deferred, with reason) are posted on the PR.
+One independent review per PR by a fresh-context reviewer (separate AI session with no access to the implementing conversation), plus one-off reviews at planning points (design freeze, backlog). Findings and the engineer's disposition (accepted / rejected / deferred, with reason) are recorded on the PR.
 
-| Checkpoint | Reviewer focus |
+Milestone PRs widen the focus:
+
+| PR | Additional focus |
 |---|---|
-| Design freeze | Over-complication, spec gaps, correctness risks, scope vs budget |
-| Every PR | Bugs and edge cases against the issue's acceptance criteria |
-| Greenfield tag | Code vs `architecture.md` drift; spec coverage; scope remaining |
-| Brownfield impact analysis | Missed layers, regression risk, test plan, before any code |
-| Ambiguous-scenario options | Are options and questions real; is the decision defensible |
-| Before submission | Acts as the grader: runs the demo from the README, checks every requirement |
+| Greenfield tag (#13) | Code vs `architecture.md` drift; spec coverage |
+| Brownfield impact analysis (#14) | Missed layers, regression risk, test plan, before any code |
+| Ambiguous options (#15) | Are the options and questions real; is the decision defensible |
+| Final (#16) | Acts as the grader: runs the README from a fresh clone, checks every requirement |
 
 ## Checks
 
 | Layer | Check |
 |---|---|
 | Before code | Acceptance criteria approved; tests written from them |
-| Local | `./mvnw verify`; git hooks block private files and non-conforming commit messages |
+| Local | `./mvnw verify`; local git hooks enforce commit message format |
 | CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build, demo script smoke run |
 | Dependencies | Dependabot for Maven and GitHub Actions |
 | Review | Independent reviewer + engineer review on every PR |
