@@ -136,7 +136,7 @@
                     </execution>
                     <execution>
                         <id>merge</id>
-                        <phase>verify</phase>
+                        <phase>post-integration-test</phase>
                         <goals>
                             <goal>merge</goal>
                         </goals>
@@ -155,7 +155,7 @@
                     </execution>
                     <execution>
                         <id>report</id>
-                        <phase>verify</phase>
+                        <phase>post-integration-test</phase>
                         <goals>
                             <goal>report</goal>
                         </goals>
