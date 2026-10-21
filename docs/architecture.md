@@ -132,7 +132,7 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 
 - `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`.
 - Dedupe by state: only a `SENT` delivery changes. Repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`.
-- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged and counted.
+- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged.
 - Mapping real vendor payloads (event names, batching, signatures) is production work inside each provider adapter.
 
 ### Errors
@@ -149,12 +149,17 @@ Every error, including authentication failures raised before any controller, use
 }
 ```
 
-- All validation errors are returned together.
-- Submitted values are never echoed back.
+- All validation errors are returned together: validation collects them (`ApiErrors`) and throws once.
+- 400 checks run before 422 checks: 422 errors are returned only when there are no 400 errors (semantic checks on malformed input are noise).
+- Request bodies bind leniently (enums and timestamps as strings), so one validator reports every field instead of the JSON parser failing on the first. A JSON value of the wrong type is 4003 with its path; unparseable JSON is 4002.
+- Submitted values are never echoed back, and never logged: unexpected errors are logged by exception type and stack only.
 - `code` is a stable contract shared across subsystems; `message` may change.
+- Framework errors without a specific code keep their HTTP status; `code` is `status * 10` if that code exists, else 5000 for 5xx and 4000 for any other status. The same rule covers the container's `/error` page (`sendError`, exceptions in filters, direct requests: 404).
+- API-key 401s (4011, 4012) carry `WWW-Authenticate: ApiKey header="X-API-Key"`; webhook 401s carry `WWW-Authenticate: Token header="X-Webhook-Token"`.
 
 | Code | HTTP | Meaning |
 |---|---|---|
+| 4000 | 400 | Bad request without a specific code (e.g. dot segments in the path, malformed HTTP framing); generic code for other statuses without one |
 | 4001 | 400 | Required header missing |
 | 4002 | 400 | Malformed JSON |
 | 4003 | 400 | Invalid field value or type |
@@ -162,7 +167,10 @@ Every error, including authentication failures raised before any controller, use
 | 4005 | 400 | Too many recipients (max 100) |
 | 4011 | 401 | API key or webhook token missing |
 | 4012 | 401 | API key or webhook token invalid |
+| 4040 | 404 | Unknown route (no path echoed) |
 | 4041 | 404 | Notification not found (also returned for another source system's notification) |
+| 4050 | 405 | Method not allowed (`Allow` header set) |
+| 4060 | 406 | Not acceptable (`Accept` cannot be satisfied) |
 | 4091 | 409 | Idempotency key reused with a different payload |
 | 4151 | 415 | Unsupported content type |
 | 4221 | 422 | `expiresAt` is in the past |
@@ -435,7 +443,7 @@ sequenceDiagram
     else delivery already final
         H->>D: audit CALLBACK_IGNORED
     else unknown deliveryId
-        H->>H: log + metric
+        H->>H: log
     end
     H-->>V: 200
 ```
@@ -445,12 +453,15 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 ## Security
 
 - Source systems: hashed, rotatable API keys; `sourceSystem` comes from the key, never the body (ADR-0001).
-- Webhooks: shared secret token per provider in `X-Webhook-Token`, checked the same way. Production: verify each vendor's own signature (ADR-0003).
+- Webhooks: secret token per provider in `X-Webhook-Token`, hashed and compared the same way (ADR-0001). The token must belong to the provider named in the path; fail-closed when none are configured. Production: verify each vendor's own signature (ADR-0003).
+- Paths whose raw URI has `.` or `..` segments (including `%2e` and `..;x` forms) are rejected with 400 / 4000 before authentication, so the path a filter checks is the path the client sent.
+- Failed authentication is logged at DEBUG (ids only), so a flood of bad credentials cannot flood the logs. Configuring a documented demo credential logs a WARN at startup.
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
-- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation, request size limit.
+- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
 - Secrets come from environment variables; nothing secret is committed.
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
+- Actuator is outside API-key auth: `health` and, in the prototype, `prometheus` need no key. In production actuator is served on an internal management port.
 
 ## Operations
 
@@ -464,7 +475,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
-- Warnings for unknown-delivery or rejected webhook calls: misconfiguration or forged callbacks.
+- Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
 
 ## Scaling path (not built)
 

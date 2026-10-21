@@ -31,6 +31,15 @@ class ActuatorExposureIT {
   }
 
   @Test
+  void healthNeedsNoApiKeyAndCarriesATraceId() throws Exception {
+    HttpResponse<String> response = get("/actuator/health");
+
+    assertThat(response.statusCode()).isEqualTo(200);
+    assertThat(response.headers().firstValue("X-Trace-Id"))
+        .hasValueSatisfying(id -> assertThat(id).matches("[0-9a-f]{32}"));
+  }
+
+  @Test
   void prometheusIsExposed() throws Exception {
     assertThat(get("/actuator/prometheus").statusCode()).isEqualTo(200);
   }
