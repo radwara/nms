@@ -3,8 +3,10 @@ package com.example.nms.provider;
 import com.example.nms.common.Channel;
 
 /**
- * A provider adapter: one vendor for one channel. {@link #send} returns the classified result and
- * does not throw for vendor errors; it is called outside any database transaction.
+ * A provider adapter: one vendor for one channel. {@link #send} is called outside any database
+ * transaction and must return within {@code nms.worker.send-timeout} (default 10s; the claim lease
+ * is longer), returning {@code TIMEOUT} itself if the vendor is slower. It returns the classified
+ * result for vendor errors; anything it throws is treated as {@code TRANSIENT}.
  */
 public interface ChannelProvider {
 

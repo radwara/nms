@@ -55,6 +55,8 @@ nms:
     batch-size: 20
     # A SENDING claim older than this is reclaimed and resent with the same deliveryId.
     lease: 30s
+    # Adapter contract: a send returns within this (TIMEOUT otherwise). Must be shorter than lease.
+    send-timeout: 10s
     # Send attempts per delivery, including the first (A-40).
     max-attempts: 4
     # First retry waits random(0, base); the bound doubles per attempt.
