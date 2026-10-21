@@ -181,7 +181,7 @@ erDiagram
     RECIPIENT ||--o{ NOTIFICATION : "recipientId"
 ```
 
-Conventions: timestamps are UTC instants; ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use identity keys; enums are stored as strings.
+Conventions: timestamps are UTC instants; persisted timestamps come from an injected `Clock` truncated to microseconds (database precision); ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use generated bigint keys (identity; a pooled sequence for `audit_event` so its inserts batch); enums are stored as strings.
 
 ### Directory (seeded, read-only)
 
@@ -202,6 +202,43 @@ Conventions: timestamps are UTC instants; ids exposed by the API are UUIDs (not 
 
 A missing preference row means **enabled** (opt-out model, usual for transactional alerts). A channel is usable only if enabled and the recipient has an address for it.
 
+#### Simulated outcomes (seeded addresses)
+
+The simulated providers derive the outcome from the address, so every path is reproducible from a seeded recipient. Seeds are synthetic (`sim.test`, fictional `+1555010...` numbers) and live in Flyway `V2__seed_directory.sql`.
+
+- Email: `<send>.<callback>@sim.test`, e.g. `timeout.delivered@sim.test`
+- SMS: `+1555010SSCC`, SS = send code, CC = callback code, e.g. `+15550100200`
+
+| Send | Email token | SMS `SS` | Send result |
+|---|---|---|---|
+| Accepted | `ok` | `00` | `SENT` |
+| `TRANSIENT` | `transient` | `01` | Fails every attempt; retried until exhausted (`FAILED`) or `EXPIRED` |
+| `TIMEOUT` | `timeout` | `02` | Fails every attempt; retried until exhausted (`FAILED`) or `EXPIRED` |
+| `RATE_LIMITED` | `ratelimit` | `03` | Fails every attempt; retried until exhausted (`FAILED`) or `EXPIRED` |
+| `PERMANENT_REJECTION` | `reject` | `04` | `FAILED` |
+| `INVALID_RECIPIENT` | `invalid` | `05` | `FAILED` |
+| `AUTH_ERROR` | `autherror` | `06` | `FAILED` |
+| Fail twice, then accept | `flaky2` | `12` | Two `TRANSIENT` failures, then `SENT` |
+
+| Callback (after `SENT`) | Email token | SMS `CC` |
+|---|---|---|
+| `DELIVERED` | `delivered` | `00` |
+| `BOUNCED` (delivery `FAILED`) | `bounce` | n/a (SMS has no bounce) |
+| `FAILED` | `failed` | `02` |
+| No callback (stays `SENT`) | `silent` | `09` |
+
+Seeded recipients:
+
+| Id | Email (@sim.test) | Phone | Shows |
+|---|---|---|---|
+| `user-ok` | `ok.delivered` | `+15550100000` | Both channels, happy path (no preference rows) |
+| `user-email-only` | `ok.delivered` | none | Email only |
+| `user-sms-optout` | `ok.delivered` | `+15550100000` | SMS opted out (`enabled = false`), email explicitly enabled |
+| `user-transient`, `user-timeout`, `user-ratelimit`, `user-reject`, `user-invalid`, `user-autherror`, `user-flaky2` | `<token>.delivered` | `+1555010<SS>00` | One per send outcome, both channels |
+| `user-bounce` | `ok.bounce` | none | Bounce callback |
+| `user-cb-failed` | `ok.failed` | `+15550100002` | Failed callback |
+| `user-silent` | `ok.silent` | `+15550100009` | No callback |
+
 ### Intake
 
 `idempotency_record`
@@ -212,7 +249,7 @@ A missing preference row means **enabled** (opt-out model, usual for transaction
 | `source_system`, `idempotency_key` | varchar(64), varchar(128) | Unique together. Longer keys rejected (4003) |
 | `request_hash` | char(64) | SHA-256 of the canonical parsed request (not raw bytes, so whitespace and key order do not cause false conflicts) |
 | `submission_id` | uuid | Links to the notifications created |
-| `created_at`, `expires_at` | timestamp | Lookups ignore expired rows; `expires_at` indexed for the purge job (7 days) |
+| `created_at`, `expires_at` | timestamp | Kept 7 days. Lookups ignore expired rows; an expired row is replaced in the same transaction via a conditional update. No purge job; purge is the production path |
 
 `notification`: one per recipient.
 
@@ -245,11 +282,11 @@ No status column: overall status is derived from deliveries.
 | `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION` |
 | `attempt_count` | int | |
 | `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
-| `claimed_at` | timestamp null | Lease start and claim token. Every outcome write is conditional on `status = SENDING` and this value; stale claims are reclaimable |
+| `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
 | `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
-| `version` | bigint | Optimistic lock for non-worker updates |
+| `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id` and `status in (SENDING, SENT)` only (final states never change). Every write increments `version` and sets `updated_at` |
 
 ### Audit
 
@@ -257,13 +294,13 @@ No status column: overall status is derived from deliveries.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | bigint PK | |
+| `id` | bigint PK | From `audit_event_seq` (increment 50, matching the entity allocation size) so inserts batch |
 | `source_system` | varchar(64) | |
 | `notification_id` | uuid null, indexed | Null for `REJECTED` requests (spec 4.9). Only authenticated requests are audited; written in its own transaction because the submission rolled back |
 | `delivery_id` | uuid null | |
 | `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `QUEUED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
 | `channel` | varchar(16) null | |
-| `detail` | varchar(256) | Codes and reasons only (attempt number, error category, provider code); never content or addresses. Replaces a separate attempts table |
+| `detail` | varchar(256) null | Codes and reasons only (attempt number, error category, provider code); never content or addresses. Replaces a separate attempts table |
 | `occurred_at` | timestamp | |
 
 API keys and webhook tokens are configuration, not tables (ADR-0001). Production path for content: encryption at rest and clearing `body` once all deliveries are final.
@@ -365,7 +402,7 @@ sequenceDiagram
     participant P as Provider adapter
     loop every poll interval
         W->>D: select due deliveries (PENDING / RETRY_SCHEDULED, nextAttemptAt <= now) by priority
-        W->>D: claim (committed): status = SENDING, claimed_at = now where id and status match
+        W->>D: claim (committed): status = SENDING, claimed_at = now, version + 1 where id, status, and version match
         W->>P: send (idempotency key = deliveryId)
         alt 200
             W->>D: SENT + providerMessageId
@@ -379,7 +416,8 @@ sequenceDiagram
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
-- Every outcome write is conditional on `status = SENDING` and the claim's `claimed_at`. A slow worker whose lease was reclaimed cannot overwrite the newer state.
+- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
+- `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout. A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 
 ### Callback
@@ -391,7 +429,7 @@ sequenceDiagram
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
     H->>H: authenticate, validate
-    H->>D: update delivery (final status, providerMessageId) where id = deliveryId and status in (SENDING, SENT)
+    H->>D: update delivery (final status, providerMessageId, version + 1) where id = deliveryId and status in (SENDING, SENT)
     alt one row updated
         H->>D: audit DELIVERED or FAILED
     else delivery already final
@@ -402,7 +440,7 @@ sequenceDiagram
     H-->>V: 200
 ```
 
-The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status. The worker's later `SENT` write is conditional on `status = SENDING` and updates nothing, so the final state stands.
+The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status. The worker's later `SENT` write is conditional on `status = SENDING` and the claim's `version`, so it updates nothing and the final state stands.
 
 ## Security
 
@@ -433,11 +471,11 @@ What to alert on:
 | Concern | Prototype | Production |
 |---|---|---|
 | Database | H2 | PostgreSQL |
-| Work claiming | Conditional update on `status` and `claimed_at` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
+| Work claiming | Conditional update on `id`, `status`, and `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
-| Retention | Idempotency purge job | Partitioned audit tables, archival |
+| Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
 
 ## Out of scope
 
