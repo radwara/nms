@@ -152,6 +152,7 @@ Every error, including authentication failures raised before any controller, use
 - All validation errors are returned together.
 - Submitted values are never echoed back.
 - `code` is a stable contract shared across subsystems; `message` may change.
+- API-key 401s (4011, 4012) carry `WWW-Authenticate: ApiKey header="X-API-Key"`.
 
 | Code | HTTP | Meaning |
 |---|---|---|
@@ -162,7 +163,10 @@ Every error, including authentication failures raised before any controller, use
 | 4005 | 400 | Too many recipients (max 100) |
 | 4011 | 401 | API key or webhook token missing |
 | 4012 | 401 | API key or webhook token invalid |
+| 4040 | 404 | Unknown route (no path echoed) |
 | 4041 | 404 | Notification not found (also returned for another source system's notification) |
+| 4050 | 405 | Method not allowed (`Allow` header set) |
+| 4060 | 406 | Not acceptable (`Accept` cannot be satisfied) |
 | 4091 | 409 | Idempotency key reused with a different payload |
 | 4151 | 415 | Unsupported content type |
 | 4221 | 422 | `expiresAt` is in the past |
@@ -451,7 +455,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
 - Secrets come from environment variables; nothing secret is committed.
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
-- Actuator is outside API-key auth; `health` is public; in production actuator is served on an internal management port.
+- Actuator is outside API-key auth: `health` and, in the prototype, `prometheus` need no key. In production actuator is served on an internal management port.
 
 ## Operations
 
