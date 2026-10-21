@@ -253,8 +253,8 @@ class SubmitValidationIT {
   }
 
   @Test
-  void nonObjectBodyIs4003() {
-    assertSingleError(submit(newKey(), "[1, 2]"), 400, 4003, null);
+  void nonObjectBodyIs4002() {
+    assertSingleError(submit(newKey(), "[1, 2]"), 400, 4002, null);
   }
 
   private MvcTestResult submit(ObjectNode body) {

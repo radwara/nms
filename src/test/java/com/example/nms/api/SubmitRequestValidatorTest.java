@@ -161,9 +161,9 @@ class SubmitRequestValidatorTest {
   }
 
   @Test
-  void nonObjectBodyIs4003AlongsideAMissingKey() {
+  void nonObjectBodyIs4002AlongsideAMissingKey() {
     assertThat(errors(null, JsonMapper.shared().createArrayNode()))
-        .containsExactly("4001 Idempotency-Key", "4003 null");
+        .containsExactly("4001 Idempotency-Key", "4002 null");
   }
 
   private List<String> errors(JsonNode body) {

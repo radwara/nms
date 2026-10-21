@@ -154,7 +154,7 @@ Every error, including authentication failures raised before any controller, use
 
 - All validation errors are returned together: validation collects them (`ApiErrors`) and throws once.
 - 400 checks run before 422 checks: 422 errors are returned only when there are no 400 errors (semantic checks on malformed input are noise).
-- Request bodies bind leniently (enums and timestamps as strings), so one validator reports every field instead of the JSON parser failing on the first. A JSON value of the wrong type is 4003 with its path; unparseable JSON is 4002.
+- Request bodies bind leniently (enums and timestamps as strings), so one validator reports every field instead of the JSON parser failing on the first. A JSON value of the wrong type is 4003 with its path; unparseable JSON, or a body of the wrong shape at the root (no path to name), is 4002.
 - Submitted values are never echoed back, and never logged: unexpected errors are logged by exception type and stack only.
 - `code` is a stable contract shared across subsystems; `message` may change.
 - Framework errors without a specific code keep their HTTP status; `code` is `status * 10` if that code exists, else 5000 for 5xx and 4000 for any other status. The same rule covers the container's `/error` page (`sendError`, exceptions in filters, direct requests: 404).
@@ -164,7 +164,7 @@ Every error, including authentication failures raised before any controller, use
 |---|---|---|
 | 4000 | 400 | Bad request without a specific code (e.g. dot segments in the path, malformed HTTP framing); generic code for other statuses without one |
 | 4001 | 400 | Required header missing |
-| 4002 | 400 | Malformed JSON |
+| 4002 | 400 | Malformed JSON, or a body of the wrong shape at the root (e.g. an array instead of an object) |
 | 4003 | 400 | Invalid field value or type |
 | 4004 | 400 | Required field missing |
 | 4005 | 400 | Too many recipients (max 100) |

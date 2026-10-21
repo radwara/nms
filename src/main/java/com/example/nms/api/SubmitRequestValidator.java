@@ -47,7 +47,7 @@ class SubmitRequestValidator {
     ApiErrors errors = new ApiErrors();
     String key = idempotencyKey(idempotencyKey, errors);
     if (body == null || !body.isObject()) {
-      errors.add(ErrorCode.INVALID_VALUE, null, "Request body must be a JSON object");
+      errors.add(ErrorCode.MALFORMED_JSON, null, "Request body must be a JSON object");
       errors.throwIfAny();
     }
 
