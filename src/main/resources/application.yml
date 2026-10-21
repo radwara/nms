@@ -40,6 +40,14 @@ nms:
   idempotency:
     # How long an accepted Idempotency-Key is honored (ADR-0002); afterwards it may create a new submission.
     retention: ${NMS_IDEMPOTENCY_RETENTION:7d}
+  routing:
+    # Channels added per severity (A-26). An opt-out or a missing address withholds them (A-30).
+    severity-escalation:
+      CRITICAL: [SMS]
+    # Provider per channel; startup fails if a channel has none.
+    providers:
+      EMAIL: sim-email
+      SMS: sim-sms
   security:
     # keyId:sourceSystem:sha256hex[,...] (ADR-0001). Empty: every /api request is rejected with 401.
     api-keys: ${NMS_API_KEYS:}

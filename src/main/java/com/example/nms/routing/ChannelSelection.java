@@ -1,0 +1,93 @@
+package com.example.nms.routing;
+
+import com.example.nms.common.Channel;
+import com.example.nms.delivery.RoutingReason;
+import com.example.nms.directory.AddressPresence;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * Channel decisions for one notification (architecture.md "Routing", A-25, A-30), in audit order:
+ * candidates in request order (or channel order for preferences), then severity escalations.
+ *
+ * <p>Candidates are the requested channels, else the recipient's enabled channels. A candidate the
+ * recipient opted out of or has no address for is removed. Escalation adds a channel unless the
+ * recipient opted out of it or has no address for it: an opt-out always wins over policy (A-30
+ * greenfield baseline). A channel already selected keeps its first reason.
+ */
+final class ChannelSelection {
+
+  static final String OPTED_OUT = "OPTED_OUT";
+  static final String NO_ADDRESS = "NO_ADDRESS";
+  static final String ESCALATION_WITHHELD = RoutingReason.SEVERITY_ESCALATION + " withheld: ";
+
+  private ChannelSelection() {}
+
+  sealed interface Decision permits Selected, Removed {
+    Channel channel();
+  }
+
+  /** The channel gets a delivery. */
+  record Selected(Channel channel, RoutingReason reason) implements Decision {}
+
+  /** The channel was removed or withheld; {@code reason} is the audited code. */
+  record Removed(Channel channel, String reason) implements Decision {}
+
+  /**
+   * @param requested channels from the request, or {@code null} to use preferences
+   * @param escalation channels the policy adds for the notification's severity
+   */
+  static List<Decision> decide(
+      List<Channel> requested,
+      List<Channel> escalation,
+      Set<Channel> optedOut,
+      AddressPresence addresses) {
+    List<Decision> decisions = new ArrayList<>();
+    Set<Channel> selected = EnumSet.noneOf(Channel.class);
+
+    List<Channel> candidates =
+        requested != null
+            ? requested
+            : Arrays.stream(Channel.values()).filter(c -> !optedOut.contains(c)).toList();
+    RoutingReason reason = requested != null ? RoutingReason.REQUESTED : RoutingReason.PREFERENCE;
+    for (Channel channel : new LinkedHashSet<>(candidates)) {
+      String unusable = unusable(channel, optedOut, addresses);
+      if (unusable != null) {
+        decisions.add(new Removed(channel, unusable));
+      } else {
+        selected.add(channel);
+        decisions.add(new Selected(channel, reason));
+      }
+    }
+
+    for (Channel channel : new LinkedHashSet<>(escalation)) {
+      if (selected.contains(channel)) {
+        continue; // already routed; keeps its first reason
+      }
+      String unusable = unusable(channel, optedOut, addresses);
+      if (unusable != null) {
+        decisions.add(new Removed(channel, ESCALATION_WITHHELD + unusable));
+      } else {
+        selected.add(channel);
+        decisions.add(new Selected(channel, RoutingReason.SEVERITY_ESCALATION));
+      }
+    }
+    return decisions;
+  }
+
+  /** Why the channel cannot be used, or {@code null}. An opt-out is reported before an address. */
+  private static String unusable(
+      Channel channel, Set<Channel> optedOut, AddressPresence addresses) {
+    if (optedOut.contains(channel)) {
+      return OPTED_OUT;
+    }
+    if (!addresses.hasAddressFor(channel)) {
+      return NO_ADDRESS;
+    }
+    return null;
+  }
+}
