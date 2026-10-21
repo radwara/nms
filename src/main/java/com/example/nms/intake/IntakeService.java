@@ -3,10 +3,9 @@ package com.example.nms.intake;
 import com.example.nms.audit.AuditRecorder;
 import com.example.nms.directory.RecipientRepository;
 import com.example.nms.intake.SubmitResult.Created;
-import com.example.nms.intake.SubmitResult.InvalidTimes;
 import com.example.nms.intake.SubmitResult.KeyConflict;
 import com.example.nms.intake.SubmitResult.Replayed;
-import com.example.nms.intake.SubmitResult.UnknownRecipients;
+import com.example.nms.intake.SubmitResult.Unprocessable;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -91,12 +90,9 @@ public class IntakeService {
     }
     // The rules below apply to new submissions only; a replay was answered above.
     List<TimeViolation> violations = TimeViolation.of(command, now);
-    if (!violations.isEmpty()) {
-      return new InvalidTimes(violations);
-    }
     List<String> unknown = unknownRecipients(command);
-    if (!unknown.isEmpty()) {
-      return new UnknownRecipients(unknown);
+    if (!violations.isEmpty() || !unknown.isEmpty()) {
+      return new Unprocessable(violations, unknown);
     }
 
     UUID submissionId = UUID.randomUUID();

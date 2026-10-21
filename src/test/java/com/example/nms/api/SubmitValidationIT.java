@@ -179,6 +179,29 @@ class SubmitValidationIT {
   }
 
   @Test
+  void timeAndRecipientErrorsAreReturnedTogetherAndNothingIsWritten() {
+    ObjectNode body = valid("user-ok", "nobody");
+    body.put("expiresAt", "2020-01-01T00:00:00Z");
+
+    MvcTestResult result = submit(body);
+
+    assertThat(result).hasStatus(422);
+    assertThat(result)
+        .bodyJson()
+        .extractingPath("$.errors[*].code")
+        .asArray()
+        .containsExactly(4221, 4223);
+    assertThat(result)
+        .bodyJson()
+        .extractingPath("$.errors[*].field")
+        .asArray()
+        .containsExactly("expiresAt", "recipients[1].userId");
+    assertThat(jdbc.queryForObject("select count(*) from notification", Integer.class)).isZero();
+    assertThat(jdbc.queryForObject("select count(*) from idempotency_record", Integer.class))
+        .isZero();
+  }
+
+  @Test
   void a400ErrorHidesThe422Errors() {
     ObjectNode body = valid("user-ok");
     body.remove("subject");
