@@ -181,7 +181,7 @@ erDiagram
     RECIPIENT ||--o{ NOTIFICATION : "recipientId"
 ```
 
-Conventions: timestamps are UTC instants; ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use identity keys; enums are stored as strings.
+Conventions: timestamps are UTC instants; persisted timestamps come from an injected `Clock` truncated to microseconds (database precision); ids exposed by the API are UUIDs (not guessable or enumerable); internal tables use identity keys; enums are stored as strings.
 
 ### Directory (seeded, read-only)
 
@@ -282,11 +282,11 @@ No status column: overall status is derived from deliveries.
 | `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION` |
 | `attempt_count` | int | |
 | `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
-| `claimed_at` | timestamp null | Lease start and claim token. Every outcome write is conditional on `status = SENDING` and this value; stale claims are reclaimable |
+| `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
 | `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
-| `version` | bigint | Optimistic lock for non-worker updates |
+| `version` | bigint | Concurrency token. Every claim, outcome, and callback write is conditional on `id`, expected `status`, and `version`, and increments `version` and sets `updated_at` |
 
 ### Audit
 
@@ -402,7 +402,7 @@ sequenceDiagram
     participant P as Provider adapter
     loop every poll interval
         W->>D: select due deliveries (PENDING / RETRY_SCHEDULED, nextAttemptAt <= now) by priority
-        W->>D: claim (committed): status = SENDING, claimed_at = now where id and status match
+        W->>D: claim (committed): status = SENDING, claimed_at = now, version + 1 where id, status, and version match
         W->>P: send (idempotency key = deliveryId)
         alt 200
             W->>D: SENT + providerMessageId
@@ -416,7 +416,8 @@ sequenceDiagram
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
-- Every outcome write is conditional on `status = SENDING` and the claim's `claimed_at`. A slow worker whose lease was reclaimed cannot overwrite the newer state.
+- Every claim, outcome, and callback write is conditional on `id`, expected `status`, and `version`, and increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
+- `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout. A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 
 ### Callback
@@ -428,7 +429,7 @@ sequenceDiagram
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
     H->>H: authenticate, validate
-    H->>D: update delivery (final status, providerMessageId) where id = deliveryId and status in (SENDING, SENT)
+    H->>D: update delivery (final status, providerMessageId, version + 1) where id = deliveryId, status in (SENDING, SENT), and version match
     alt one row updated
         H->>D: audit DELIVERED or FAILED
     else delivery already final
@@ -439,7 +440,7 @@ sequenceDiagram
     H-->>V: 200
 ```
 
-The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status. The worker's later `SENT` write is conditional on `status = SENDING` and updates nothing, so the final state stands.
+The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status. The worker's later `SENT` write is conditional on `status = SENDING` and the claim's `version`, so it updates nothing and the final state stands.
 
 ## Security
 
@@ -470,7 +471,7 @@ What to alert on:
 | Concern | Prototype | Production |
 |---|---|---|
 | Database | H2 | PostgreSQL |
-| Work claiming | Conditional update on `status` and `claimed_at` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
+| Work claiming | Conditional update on `id`, `status`, and `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |

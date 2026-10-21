@@ -20,8 +20,10 @@ Delivery must be asynchronous, survive restarts, support scheduled sends and del
 The `delivery` table is the queue.
 
 - A scheduled worker polls for due rows (`PENDING` or `RETRY_SCHEDULED`, `nextAttemptAt <= now`), ordered by priority then due time, in small batches.
-- One single-threaded poller. A row is claimed with a conditional update (`status = SENDING`, `claimed_at = now` where id and due status match), committed before the send. Only one claimer wins.
-- Every outcome write is conditional on `status = SENDING` and the claim's `claimed_at`, so a slow worker whose lease was reclaimed cannot overwrite newer state.
+- One single-threaded poller. A row is claimed with a conditional update (`status = SENDING`, `claimed_at = now`), committed before the send. Only one claimer wins.
+- Every claim, outcome, and callback write is conditional on `id`, expected `status`, and `version`, and increments `version` and sets `updated_at`. A slow worker whose lease was reclaimed cannot overwrite newer state: the reclaim bumped `version`.
+- `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`).
+- Persisted timestamps come from an injected `Clock` truncated to microseconds (database precision).
 - Scheduling is `nextAttemptAt = scheduledAt`; a retry is `nextAttemptAt = now + backoff`.
 - The lease is longer than the provider timeout. A row stuck in `SENDING` past the lease is reclaimable after a crash; the resend reuses the same provider idempotency key (`deliveryId`).
 - Priority is copied onto the delivery as a number so the poll sorts correctly with an index on `(status, priority, next_attempt_at)`.
