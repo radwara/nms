@@ -7,3 +7,5 @@ logging:
   structured:
     format:
       console: ""
+  pattern:
+    correlation: "[%X{traceId:-}] "
