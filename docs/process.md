@@ -90,3 +90,5 @@ Any defect found in review, testing, or demo becomes a `bug` issue (repro, root 
 | Change to existing code | `enhancement` or `bug` issue -> PR |
 
 Record outcomes and who raised what, not transcripts.
+
+Review findings that affect a later issue are folded into that issue's acceptance criteria (suffix "(added from #N review)"); the comment stays as history. Criteria delivered early by another issue are marked "(delivered in #N)". The issue body is the single source of truth for what to build and what reviewers check.
