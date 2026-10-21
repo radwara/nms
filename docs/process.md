@@ -75,7 +75,9 @@ Milestone PRs widen the focus:
 
 ## Bugs
 
-Any defect found in review, testing, or demo becomes a `bug` issue (repro, root cause), fixed in its own PR with a regression test. Label `found-by:review`, `found-by:test`, or `found-by:engineer`.
+- Defects in merged code: a `bug` issue (repro, root cause), fixed in its own PR with a regression test.
+- Defects caught by review or CI before merge: fixed in that PR and recorded in its review table; significant ones (correctness, security, data leak) also get a closed `bug` issue linked to the fixing PR, for traceability.
+- Label `found-by:review`, `found-by:test`, or `found-by:engineer`.
 
 ## Labels
 

@@ -1,5 +1,6 @@
 package com.example.nms.audit;
 
+import com.example.nms.common.Channel;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -19,6 +20,7 @@ public class AuditRecorder {
 
   static final int MAX_DETAIL_LENGTH = 256;
   static final String DUPLICATE_DETAIL = "same Idempotency-Key; original returned";
+  static final String NOT_ROUTED_DETAIL = "no usable channel";
 
   private final AuditEventRepository events;
   private final Clock clock;
@@ -47,6 +49,52 @@ public class AuditRecorder {
             null,
             DUPLICATE_DETAIL,
             at));
+  }
+
+  /** A channel selected for a delivery; {@code reason} is the routing reason code. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void routed(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      String reason,
+      Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem, notificationId, deliveryId, AuditEventType.ROUTED, channel, reason, at));
+  }
+
+  /** A channel removed or withheld by routing; {@code reason} is a code, e.g. {@code OPTED_OUT}. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void routeRemoved(
+      String sourceSystem, UUID notificationId, Channel channel, String reason, Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem, notificationId, null, AuditEventType.ROUTE_REMOVED, channel, reason, at));
+  }
+
+  /** No channel remained, so the notification has no deliveries. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void notRouted(String sourceSystem, UUID notificationId, Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            notificationId,
+            null,
+            AuditEventType.NOT_ROUTED,
+            null,
+            NOT_ROUTED_DETAIL,
+            at));
+  }
+
+  /** A delivery written to the queue, due at its {@code next_attempt_at}. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void queued(
+      String sourceSystem, UUID notificationId, UUID deliveryId, Channel channel, Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem, notificationId, deliveryId, AuditEventType.QUEUED, channel, null, at));
   }
 
   /**

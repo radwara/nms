@@ -322,11 +322,23 @@ API keys and webhook tokens are configuration, not tables (ADR-0001). Production
 
 Resolved per notification (one recipient):
 
-1. Candidates: the recipient's `channels` from the request if given, else the recipient's enabled channels.
-2. Remove channels the recipient opted out of, and channels with no contact address.
-3. Apply policy from config, e.g. `CRITICAL` adds `SMS`. In greenfield an opt-out always wins over policy (revisited in the ambiguous scenario, A-30).
-4. Each remaining channel becomes a `Delivery`. Every add and remove is audited with a reason.
-5. No channel left: no deliveries, overall status `NOT_ROUTED`.
+1. Candidates: the recipient's `channels` from the request if given (reason `REQUESTED`), else every channel (`PREFERENCE`).
+2. Remove channels the recipient opted out of (`ROUTE_REMOVED`, detail `OPTED_OUT`), and channels with no contact address (`NO_ADDRESS`). An opt-out is reported first. Without a request, the remaining channels are the recipient's usable ones, and every skipped channel has a removal event.
+3. Apply policy from config, e.g. `CRITICAL` adds `SMS` (`SEVERITY_ESCALATION`). In greenfield an opt-out always wins over policy (revisited in the ambiguous scenario, A-30): a withheld escalation is `ROUTE_REMOVED` with detail `SEVERITY_ESCALATION withheld: OPTED_OUT|NO_ADDRESS`. A channel already selected keeps its first reason.
+4. Each remaining channel becomes a `PENDING` `Delivery`: provider from config, numeric priority from the notification, `next_attempt_at = max(now, scheduledAt)`. Audited `ROUTED` (detail = reason), then `QUEUED` per delivery.
+5. No channel left: no deliveries, `NOT_ROUTED` audited, overall status `NOT_ROUTED`.
+
+Per notification, history read by `occurred_at, id` is `ACCEPTED`, then `ROUTED`/`ROUTE_REMOVED` in decision order (candidates, then escalations), then `QUEUED`. Routing runs once per submission inside the submit transaction: one address-presence query (no contact details loaded) and one opt-out query for all recipients, deliveries inserted in JDBC batches, no provider calls. A replay never routes.
+
+```yaml
+nms:
+  routing:
+    severity-escalation:   # channels added per severity
+      CRITICAL: [SMS]
+    providers:             # required for every channel; startup fails otherwise
+      EMAIL: sim-email
+      SMS: sim-sms
+```
 
 ## Delivery lifecycle
 
@@ -406,7 +418,7 @@ sequenceDiagram
             I->>D: claim key: insert record, or conditional update of the expired one
             I->>D: insert Notifications (batched), flush
             I->>D: audit ACCEPTED per notification
-            I->>D: route the submission once (Deliveries, ROUTED, QUEUED; #9)
+            I->>D: route the submission once (Deliveries, ROUTED / ROUTE_REMOVED / NOT_ROUTED, QUEUED)
             I-->>S: 202 + notifications (after commit)
         end
     end
