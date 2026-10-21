@@ -20,6 +20,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -141,7 +142,7 @@ class SubmitConcurrencyIT {
     }
 
     @Override
-    public void route(Notification notification, Instant now) {
+    public void route(List<Notification> notifications, Instant now) {
       if (armed.compareAndSet(true, false)) {
         held.countDown();
         try {

@@ -11,6 +11,6 @@ class IntakeConfiguration {
   /** Placeholder until routing (#9) provides the real step: creates no deliveries. */
   @Bean
   RoutingStep routingStep() {
-    return (notification, now) -> {};
+    return (notifications, now) -> {};
   }
 }

@@ -108,10 +108,9 @@ public class IntakeService {
     // Deliveries reference notifications by a plain column (no association Hibernate could order
     // inserts by), so the notifications go to the database before routing adds deliveries.
     notifications.flush();
-    for (Notification notification : created) {
-      routing.route(notification, now);
-      audit.accepted(command.sourceSystem(), notification.getId(), now);
-    }
+    // ACCEPTED first, so each notification's history starts with it and routing events follow.
+    created.forEach(n -> audit.accepted(command.sourceSystem(), n.getId(), now));
+    routing.route(created, now);
     log.info(
         "Submission {} accepted: {} notifications for source system {}",
         submissionId,
