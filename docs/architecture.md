@@ -150,3 +150,165 @@ Every error, including authentication failures raised before any controller, use
 | 4222 | 422 | `scheduledAt` is after `expiresAt` |
 | 4223 | 422 | Unknown recipient (whole request rejected, every unknown recipient listed) |
 | 5000 | 500 | Internal error (no detail, `traceId` only) |
+
+## Data model
+
+```mermaid
+erDiagram
+    IDEMPOTENCY_RECORD ||--|{ NOTIFICATION : "submissionId"
+    NOTIFICATION ||--|{ DELIVERY : "one per channel"
+    DELIVERY ||--o{ DELIVERY_ATTEMPT : "one per send call"
+    DELIVERY ||--o{ PROVIDER_EVENT : "callbacks"
+    NOTIFICATION ||--o{ AUDIT_EVENT : "history"
+    RECIPIENT ||--o{ CHANNEL_PREFERENCE : "per channel"
+    RECIPIENT ||--o{ NOTIFICATION : "recipientId"
+```
+
+| Entity | Key fields | Notes |
+|---|---|---|
+| `IdempotencyRecord` | `sourceSystem`, `idempotencyKey` (unique together), `requestHash`, `submissionId`, `expiresAt` | Separate table so keys can expire (7 days) and be purged |
+| `Notification` | `id`, `submissionId`, `sourceSystem`, `eventId`, `type`, `severity`, `priority`, `recipientId`, `subject`, `body`, `scheduledAt`, `expiresAt`, `createdAt` | One recipient. Overall status is derived, never stored |
+| `Delivery` | `id`, `notificationId`, `channel` (unique together), `status`, `attemptCount`, `nextAttemptAt`, `claimedAt`, `providerMessageId`, `failureReason`, `sentAt`, `finalizedAt`, `version` | Unit of work for the worker. `version` for optimistic locking |
+| `DeliveryAttempt` | `deliveryId`, `attemptNo` (unique together), `outcome`, `errorCategory`, `providerCode`, `startedAt`, `durationMs` | One row per send call; history is never overwritten |
+| `ProviderEvent` | `provider`, `eventKey` (unique together), `providerMessageId`, `rawStatus`, `mappedStatus`, `matched`, `receivedAt` | Callback log for dedupe and late matching |
+| `AuditEvent` | `notificationId`, `deliveryId`, `type`, `detail`, `occurredAt` | Append-only. No message content or contact details |
+| `Recipient` | `id`, `email`, `phone` | Seeded directory |
+| `ChannelPreference` | `recipientId`, `channel`, `enabled` | Seeded; disabled = opted out |
+
+API keys and webhook tokens are configuration, not tables (ADR-0001).
+
+## Routing
+
+Resolved per notification (one recipient):
+
+1. Candidates: request `channels` if given, else the recipient's enabled channels.
+2. Remove channels the recipient opted out of, and channels with no contact address.
+3. Apply policy from config, e.g. `CRITICAL` adds `SMS`. In greenfield an opt-out always wins over policy (revisited in the ambiguous scenario, A-30).
+4. Each remaining channel becomes a `Delivery`. Every add and remove is audited with a reason.
+5. No channel left: no deliveries, overall status `NOT_ROUTED`.
+
+## Delivery lifecycle
+
+Two-phase: a vendor `200` means accepted (`SENT`); the final outcome arrives by callback (ADR-0003).
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> SENDING: claimed by worker
+    RETRY_SCHEDULED --> SENDING: due
+    SENDING --> SENT: vendor 200
+    SENDING --> RETRY_SCHEDULED: transient / timeout / rate limited
+    SENDING --> FAILED: permanent / invalid recipient / auth error / attempts exhausted
+    PENDING --> EXPIRED: past expiresAt
+    RETRY_SCHEDULED --> EXPIRED: past expiresAt
+    SENT --> DELIVERED: callback
+    SENT --> BOUNCED: callback (email)
+    SENT --> FAILED: callback
+```
+
+- `SENT` with no callback stays `SENT` indefinitely. That is the honest state.
+- After `SENT` nothing is resent; the vendor owns its own retries.
+- Final states never change. Late or duplicate callbacks are ignored and audited.
+
+### Failure classification (send call)
+
+| Category | Example | Action |
+|---|---|---|
+| `TRANSIENT` | 5xx, connection reset | Retry with backoff |
+| `TIMEOUT` | No response in time | Retry with backoff; same provider idempotency key (`deliveryId`) |
+| `RATE_LIMITED` | 429 | Retry after `Retry-After`, else backoff |
+| `PERMANENT_REJECTION` | Vendor refuses content | `FAILED` |
+| `INVALID_RECIPIENT` | Bad address or number | `FAILED` |
+| `AUTH_ERROR` | Vendor rejects our credentials | `FAILED`, error log, metric (config problem, not delivery problem) |
+
+Retries: max 4 attempts (configurable), exponential backoff with full jitter, never scheduled past `expiresAt`.
+
+### Overall status (derived on read)
+
+| Deliveries | `overallStatus` |
+|---|---|
+| Before `scheduledAt` | `SCHEDULED` |
+| Any `PENDING`, `SENDING`, `RETRY_SCHEDULED` | `IN_PROGRESS` |
+| Otherwise any `SENT` | `AWAITING_CONFIRMATION` |
+| All `DELIVERED` | `DELIVERED` |
+| Some `DELIVERED`, rest failed, bounced, or expired | `PARTIALLY_DELIVERED` |
+| None delivered, all `EXPIRED` | `EXPIRED` |
+| None delivered, otherwise | `FAILED` |
+| No deliveries | `NOT_ROUTED` |
+
+"Delivered" means every routed channel was delivered, not "recipient reached on some channel" (A-22).
+
+## Control flow
+
+### Submit
+
+```mermaid
+sequenceDiagram
+    participant S as Source system
+    participant A as API
+    participant I as Intake
+    participant D as Database
+    S->>A: POST /notifications (X-API-Key, Idempotency-Key)
+    A->>A: authenticate, validate
+    A->>I: submit
+    I->>D: insert IdempotencyRecord (unique sourceSystem + key)
+    alt key exists, same hash
+        I->>D: audit DUPLICATE_SUBMISSION
+        I-->>S: 200 + original notifications
+    else key exists, different hash
+        I-->>S: 409 / 4091
+    else new
+        I->>D: per recipient: Notification, routed Deliveries (PENDING), audit events
+        I-->>S: 202 + notifications
+    end
+```
+
+One transaction per submission: the idempotency record and all notifications commit together or not at all.
+
+### Deliver
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant D as Database
+    participant P as Provider adapter
+    loop every poll interval
+        W->>D: select due deliveries (PENDING / RETRY_SCHEDULED, nextAttemptAt <= now) by priority
+        W->>D: claim: status = SENDING where id and version match
+        W->>P: send (idempotency key = deliveryId)
+        alt 200
+            W->>D: SENT + providerMessageId, apply any unmatched callbacks
+        else retryable
+            W->>D: RETRY_SCHEDULED, nextAttemptAt = now + backoff
+        else final
+            W->>D: FAILED + reason
+        end
+        W->>D: DeliveryAttempt + audit events
+    end
+```
+
+- Claiming is a conditional update on `version`, so two workers can never send the same delivery.
+- A delivery stuck in `SENDING` longer than the lease (crash mid-send) becomes claimable again. The resend reuses the same provider idempotency key.
+
+### Callback
+
+```mermaid
+sequenceDiagram
+    participant V as Vendor
+    participant H as Webhook handler
+    participant D as Database
+    V->>H: POST /webhooks/{provider} (X-Webhook-Token)
+    H->>H: authenticate; adapter maps vendor event to our status
+    H->>D: insert ProviderEvent (unique provider + eventKey)
+    alt duplicate event
+        H-->>V: 200 (ignored)
+    else delivery found and SENT
+        H->>D: final status + finalizedAt + audit
+        H-->>V: 200
+    else delivery not found yet
+        H->>D: keep ProviderEvent unmatched (applied when SENT commits)
+        H-->>V: 200
+    end
+```
+
+Unmatched events cover the race where a vendor calls back before our `SENT` write commits.
