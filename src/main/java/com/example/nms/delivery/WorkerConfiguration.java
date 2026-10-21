@@ -1,11 +1,13 @@
 package com.example.nms.delivery;
 
+import java.time.Duration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.SchedulingConfigurer;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
 @Configuration(proxyBeanMethods = false)
@@ -23,8 +25,9 @@ class WorkerConfiguration {
   }
 
   /**
-   * The poller: one fixed-delay task on Spring Boot's scheduler (one thread by default), so polls
-   * never overlap. Off with {@code nms.worker.enabled=false}.
+   * The poller: one fixed-delay task on its own one-thread scheduler, so polls never overlap. On
+   * shutdown the worker stops after the delivery in progress, and the scheduler waits longer than
+   * one send for it. Off with {@code nms.worker.enabled=false}.
    */
   @Configuration(proxyBeanMethods = false)
   @EnableScheduling
@@ -37,6 +40,20 @@ class WorkerConfiguration {
     Poller(DeliveryWorker worker, WorkerProperties properties) {
       this.worker = worker;
       this.properties = properties;
+    }
+
+    /** Extra wait on shutdown beyond one send, for the outcome write. */
+    static final Duration SHUTDOWN_MARGIN = Duration.ofSeconds(5);
+
+    @Bean
+    ThreadPoolTaskScheduler deliveryPollerScheduler() {
+      ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+      scheduler.setPoolSize(1);
+      scheduler.setThreadNamePrefix("delivery-poller-");
+      scheduler.setWaitForTasksToCompleteOnShutdown(true);
+      scheduler.setAwaitTerminationMillis(
+          properties.sendTimeout().plus(SHUTDOWN_MARGIN).toMillis());
+      return scheduler;
     }
 
     @Override
