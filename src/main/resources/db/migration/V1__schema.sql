@@ -84,7 +84,7 @@ create table audit_event (
     delivery_id     uuid,
     type            varchar(32)              not null,
     channel         varchar(16),
-    detail          varchar(256)             not null,
+    detail          varchar(256)             null,
     occurred_at     timestamp with time zone not null,
     constraint pk_audit_event primary key (id)
 );

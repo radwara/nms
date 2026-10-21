@@ -300,7 +300,7 @@ No status column: overall status is derived from deliveries.
 | `delivery_id` | uuid null | |
 | `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `QUEUED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
 | `channel` | varchar(16) null | |
-| `detail` | varchar(256) | Codes and reasons only (attempt number, error category, provider code); never content or addresses. Replaces a separate attempts table |
+| `detail` | varchar(256) null | Codes and reasons only (attempt number, error category, provider code); never content or addresses. Replaces a separate attempts table |
 | `occurred_at` | timestamp | |
 
 API keys and webhook tokens are configuration, not tables (ADR-0001). Production path for content: encryption at rest and clearing `body` once all deliveries are final.
