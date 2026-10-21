@@ -91,6 +91,43 @@ class RoutingIT {
   }
 
   @Test
+  void withoutChannelsAnOptedOutChannelIsRemovedAndAudited() {
+    UUID id = submitOne(Severity.INFO, "user-sms-optout", null);
+
+    assertThat(routes(id)).containsExactly("EMAIL PREFERENCE");
+    assertThat(history(id))
+        .containsExactly(
+            "ACCEPTED", "ROUTED EMAIL PREFERENCE", "ROUTE_REMOVED SMS OPTED_OUT", "QUEUED EMAIL");
+  }
+
+  @Test
+  void recipientOptedOutOfEveryChannelIsNotRoutedWithEachRemovalAudited() {
+    // Synthetic test-only recipient; the seeded directory (V2) stays unchanged.
+    jdbc.update(
+        "merge into recipient (id, email, phone) key (id) values (?, ?, ?)",
+        "test-all-optout",
+        "ok.delivered@sim.test",
+        "+15550100000");
+    for (String channel : List.of("EMAIL", "SMS")) {
+      jdbc.update(
+          "merge into channel_preference (recipient_id, channel, enabled) key (recipient_id, channel)"
+              + " values (?, ?, false)",
+          "test-all-optout",
+          channel);
+    }
+
+    UUID id = submitOne(Severity.INFO, "test-all-optout", null);
+
+    assertThat(deliveriesOf(id)).isEmpty();
+    assertThat(history(id))
+        .containsExactly(
+            "ACCEPTED",
+            "ROUTE_REMOVED EMAIL OPTED_OUT",
+            "ROUTE_REMOVED SMS OPTED_OUT",
+            "NOT_ROUTED no usable channel");
+  }
+
+  @Test
   void channelWithoutAddressIsRemovedAndAudited() {
     UUID id = submitOne(Severity.INFO, "user-email-only", SMS_EMAIL);
 
@@ -243,6 +280,7 @@ class RoutingIT {
         .containsExactly(
             "ACCEPTED",
             "ROUTED EMAIL PREFERENCE",
+            "ROUTE_REMOVED SMS OPTED_OUT",
             "ROUTE_REMOVED SMS SEVERITY_ESCALATION withheld: OPTED_OUT",
             "QUEUED EMAIL");
   }

@@ -37,9 +37,15 @@ class ChannelSelectionTest {
   }
 
   @Test
-  void preferencesSkipOptedOutChannels() {
+  void withoutRequestedChannelsAnOptedOutChannelIsRemoved() {
     assertThat(ChannelSelection.decide(null, NO_ESCALATION, Set.of(SMS), BOTH))
-        .containsExactly(new Selected(EMAIL, PREFERENCE));
+        .containsExactly(new Selected(EMAIL, PREFERENCE), new Removed(SMS, "OPTED_OUT"));
+  }
+
+  @Test
+  void withoutRequestedChannelsEveryOptOutIsRemoved() {
+    assertThat(ChannelSelection.decide(null, NO_ESCALATION, Set.of(EMAIL, SMS), BOTH))
+        .containsExactly(new Removed(EMAIL, "OPTED_OUT"), new Removed(SMS, "OPTED_OUT"));
   }
 
   @Test

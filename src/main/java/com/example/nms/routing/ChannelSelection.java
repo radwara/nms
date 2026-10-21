@@ -14,10 +14,11 @@ import java.util.Set;
  * Channel decisions for one notification (architecture.md "Routing", A-25, A-30), in audit order:
  * candidates in request order (or channel order for preferences), then severity escalations.
  *
- * <p>Candidates are the requested channels, else the recipient's enabled channels. A candidate the
- * recipient opted out of or has no address for is removed. Escalation adds a channel unless the
- * recipient opted out of it or has no address for it: an opt-out always wins over policy (A-30
- * greenfield baseline). A channel already selected keeps its first reason.
+ * <p>Candidates are the requested channels, else every channel. A candidate the recipient opted out
+ * of or has no address for is removed, so without a request the removals explain every channel the
+ * recipient does not get. Escalation adds a channel unless the recipient opted out of it or has no
+ * address for it: an opt-out always wins over policy (A-30 greenfield baseline). A channel already
+ * selected keeps its first reason.
  */
 final class ChannelSelection {
 
@@ -49,10 +50,7 @@ final class ChannelSelection {
     List<Decision> decisions = new ArrayList<>();
     Set<Channel> selected = EnumSet.noneOf(Channel.class);
 
-    List<Channel> candidates =
-        requested != null
-            ? requested
-            : Arrays.stream(Channel.values()).filter(c -> !optedOut.contains(c)).toList();
+    List<Channel> candidates = requested != null ? requested : Arrays.asList(Channel.values());
     RoutingReason reason = requested != null ? RoutingReason.REQUESTED : RoutingReason.PREFERENCE;
     for (Channel channel : new LinkedHashSet<>(candidates)) {
       String unusable = unusable(channel, optedOut, addresses);
