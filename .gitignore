@@ -12,3 +12,6 @@ target/
 *.iml
 .vscode/
 .DS_Store
+
+# Local H2 file database (dev profile)
+data/
