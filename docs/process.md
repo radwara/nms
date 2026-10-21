@@ -14,6 +14,15 @@ AI drafts within a task; the engineer approves every gate. No code is merged wit
 
 Brownfield starts with a written impact analysis of the tagged greenfield code. Ambiguous starts with options and questions before any code.
 
+## Roles
+
+| Role | Who |
+|---|---|
+| Engineer | Decides, approves gates, reviews and merges PRs |
+| Orchestrator (AI session) | Plans the issue, briefs the implementer, checks output against acceptance criteria, opens the PR, runs reviewers, brings findings to the engineer |
+| Implementer (AI subagent) | Writes code and tests for one issue on its branch; runs `./mvnw verify`; does not push |
+| Reviewers (AI subagents, fresh context) | Bug, architecture, performance, and general reviews per PR |
+
 ## Per-issue loop
 
 ```
@@ -25,6 +34,15 @@ issue (acceptance criteria) -> branch -> tests from criteria -> AI implements
 ## Independent review checkpoints
 
 One independent review per PR by a fresh-context reviewer (separate AI session with no access to the implementing conversation), plus one-off reviews at planning points (design freeze, backlog). Findings and the engineer's disposition (accepted / rejected / deferred, with reason) are recorded on the PR.
+
+Reviewers are chosen per PR:
+
+| Reviewer | When |
+|---|---|
+| Bug finder | Every PR |
+| Architecture review | PRs that set or change structure: scaffold, schema, API platform, worker, brownfield |
+| Performance check | PRs with queries, polling, or hot paths: schema indexes, worker poll and claim, status and audit reads, dedup lookup |
+| General review | PRs with heavy or cross-cutting acceptance criteria: checks intent against spec, issue, ADRs, and architecture |
 
 Milestone PRs widen the focus:
 
@@ -41,7 +59,7 @@ Milestone PRs widen the focus:
 |---|---|
 | Before code | Acceptance criteria approved; tests written from them |
 | Local | `./mvnw verify`; local git hooks enforce commit message format |
-| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build, demo script smoke run |
+| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build and non-root check; demo script smoke run (from #13) |
 | Dependencies | Dependabot for Maven and GitHub Actions |
 | Review | Independent reviewer + engineer review on every PR |
 | Traceability | `requirements.md` Test column filled per merged requirement |
