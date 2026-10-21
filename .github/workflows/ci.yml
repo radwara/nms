@@ -45,3 +45,20 @@ jobs:
 
       - name: Verify image runs as non-root
         run: test "$(docker run --rm --entrypoint id nms:ci -u)" != "0"
+
+      - name: Test and coverage summary
+        if: always()
+        run: |
+          read tests failures errors skipped < <(cat target/surefire-reports/TEST-*.xml target/failsafe-reports/TEST-*.xml 2>/dev/null \
+            | grep -o '<testsuite [^>]*>' \
+            | awk '{ for (i = 1; i <= NF; i++) { split($i, kv, "="); gsub(/"/, "", kv[2]);
+                       if (kv[1] == "tests") t += kv[2]; if (kv[1] == "failures") f += kv[2];
+                       if (kv[1] == "errors") e += kv[2]; if (kv[1] == "skipped") s += kv[2] } }
+                   END { print t + 0, f + 0, e + 0, s + 0 }')
+          coverage=$(awk -F, 'NR > 1 { m += $8; c += $9 } END { if (m + c > 0) printf "%.1f%%", 100 * c / (m + c); else print "n/a" }' target/site/jacoco/jacoco.csv 2>/dev/null || echo "n/a")
+          {
+            echo "## Tests and coverage"
+            echo "| Tests | Passed | Failed | Errors | Skipped | Line coverage |"
+            echo "|---|---|---|---|---|---|"
+            echo "| $tests | $((tests - failures - errors - skipped)) | $failures | $errors | $skipped | $coverage |"
+          } >> "$GITHUB_STEP_SUMMARY"
