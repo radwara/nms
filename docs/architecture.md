@@ -442,7 +442,7 @@ sequenceDiagram
     participant D as Database
     participant P as Provider adapter
     loop every poll interval
-        W->>D: one query per due status (PENDING, RETRY_SCHEDULED, SENDING past the lease), best batch-size merged by priority, due time
+        W->>D: one query per due status and priority (PENDING, RETRY_SCHEDULED x HIGH, NORMAL, LOW) plus SENDING past the lease, best batch-size merged by priority, due time
         W->>D: load the batch's notifications and recipients (findAllById)
         alt past expiresAt
             W->>D: EXPIRED + audit, no send
@@ -465,7 +465,8 @@ sequenceDiagram
 - Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
-- The poll runs one query per due status (`status = :s and next_attempt_at <= :now order by status, priority, next_attempt_at limit :n`) and merges in Java; a `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001).
+- The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
+- When a poll sees a full batch due, the poller polls again at once, for up to one poll interval, so a backlog drains at send speed instead of one batch per interval.
 - Rows are worked one at a time: claim, send, outcome.
 - A row that cannot be sent fails without a claim (conditional on the polled status and version), with an ERROR log by id and a `FAILED` audit: `NO_PROVIDER_ADAPTER`, `NO_ADDRESS`, `MISSING_RECIPIENT`, `MISSING_NOTIFICATION` (no audit: no source system). Any other error before the claim pushes `next_attempt_at` forward (backoff, at least 1s), so a poison row cannot keep sorting first and stall the queue.
 - A provider that throws counts as a `TRANSIENT` failure (code `exception`) and goes through the retry policy. An error after the claim (outcome write) leaves the row `SENDING`; it is reclaimed after the lease.
@@ -481,7 +482,7 @@ Worker settings:
 nms:
   worker:
     enabled: true          # NMS_WORKER_ENABLED; off = deliveries stay queued (tests drive runOnce())
-    poll-interval: 500ms   # fixed delay between polls; one scheduler thread, polls never overlap
+    poll-interval: 500ms   # fixed delay between polls (after a backlog drain of up to one interval); one thread
     batch-size: 20         # rows worked per poll
     lease: 30s             # SENDING older than this is reclaimed and resent; must exceed send-timeout
     send-timeout: 10s      # adapter contract: send returns within this (TIMEOUT otherwise)
@@ -533,7 +534,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health` (database only; the worker is not part of health) |
-| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `FAILED`, or `EXPIRED`; `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per status, so it saturates at 3 x batch-size), set by the poller with no query per scrape |
+| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `FAILED`, or `EXPIRED`; `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
