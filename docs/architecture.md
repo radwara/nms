@@ -149,13 +149,17 @@ Every error, including authentication failures raised before any controller, use
 }
 ```
 
-- All validation errors are returned together.
-- Submitted values are never echoed back.
+- All validation errors are returned together: validation collects them (`ApiErrors`) and throws once.
+- 400 checks run before 422 checks: 422 errors are returned only when there are no 400 errors (semantic checks on malformed input are noise).
+- Request bodies bind leniently (enums and timestamps as strings), so one validator reports every field instead of the JSON parser failing on the first. A JSON value of the wrong type is 4003 with its path; unparseable JSON is 4002.
+- Submitted values are never echoed back, and never logged: unexpected errors are logged by exception type and stack only.
 - `code` is a stable contract shared across subsystems; `message` may change.
-- API-key 401s (4011, 4012) carry `WWW-Authenticate: ApiKey header="X-API-Key"`.
+- Framework errors without a specific code keep their HTTP status; `code` is `status * 10` if that code exists, else 5000 for 5xx and 4000 for any other status. The same rule covers the container's `/error` page (`sendError`, exceptions in filters, direct requests: 404).
+- API-key 401s (4011, 4012) carry `WWW-Authenticate: ApiKey header="X-API-Key"`; webhook 401s carry `WWW-Authenticate: Token header="X-Webhook-Token"`.
 
 | Code | HTTP | Meaning |
 |---|---|---|
+| 4000 | 400 | Bad request without a specific code (e.g. dot segments in the path, malformed HTTP framing); generic code for other statuses without one |
 | 4001 | 400 | Required header missing |
 | 4002 | 400 | Malformed JSON |
 | 4003 | 400 | Invalid field value or type |
@@ -449,7 +453,9 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 ## Security
 
 - Source systems: hashed, rotatable API keys; `sourceSystem` comes from the key, never the body (ADR-0001).
-- Webhooks: shared secret token per provider in `X-Webhook-Token`, checked the same way. Production: verify each vendor's own signature (ADR-0003).
+- Webhooks: secret token per provider in `X-Webhook-Token`, hashed and compared the same way (ADR-0001). The token must belong to the provider named in the path; fail-closed when none are configured. Production: verify each vendor's own signature (ADR-0003).
+- Paths whose raw URI has `.` or `..` segments (including `%2e` and `..;x` forms) are rejected with 400 / 4000 before authentication, so the path a filter checks is the path the client sent.
+- Failed authentication is logged at DEBUG (ids only), so a flood of bad credentials cannot flood the logs. Configuring a documented demo credential logs a WARN at startup.
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
 - Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
