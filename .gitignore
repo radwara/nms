@@ -1,0 +1,14 @@
+# Private, never committed
+.private/
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Build
+target/
+*.log
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
