@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   build:
@@ -20,6 +21,7 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
 
       - uses: actions/setup-java@v4
         with:
@@ -36,6 +38,10 @@ jobs:
         with:
           name: jacoco-report
           path: target/site/jacoco/
+          if-no-files-found: error
 
       - name: Build Docker image
         run: docker build -t nms:ci .
+
+      - name: Verify image runs as non-root
+        run: test "$(docker run --rm --entrypoint id nms:ci -u)" != "0"
