@@ -2,11 +2,13 @@ package com.example.nms.api;
 
 import com.fasterxml.jackson.annotation.JsonValue;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 
 /**
  * Stable error codes shared by every endpoint (architecture.md, Errors). Serialized as the code.
  */
 public enum ErrorCode {
+  BAD_REQUEST(4000, HttpStatus.BAD_REQUEST, "Bad request"),
   HEADER_MISSING(4001, HttpStatus.BAD_REQUEST, "Required header is missing"),
   MALFORMED_JSON(4002, HttpStatus.BAD_REQUEST, "Malformed JSON"),
   INVALID_VALUE(4003, HttpStatus.BAD_REQUEST, "Invalid value"),
@@ -47,5 +49,18 @@ public enum ErrorCode {
 
   public String defaultMessage() {
     return defaultMessage;
+  }
+
+  /**
+   * Code for a status that has no specific code (framework errors, {@code /error}): the catalog
+   * code {@code status * 10} if one exists, else 5000 for 5xx and 4000 for anything else.
+   */
+  public static ErrorCode forStatus(HttpStatusCode status) {
+    for (ErrorCode candidate : values()) {
+      if (candidate.code == status.value() * 10) {
+        return candidate;
+      }
+    }
+    return status.is5xxServerError() ? INTERNAL_ERROR : BAD_REQUEST;
   }
 }
