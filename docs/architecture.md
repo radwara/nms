@@ -378,7 +378,7 @@ stateDiagram-v2
 | `INVALID_RECIPIENT` | Bad address or number | `FAILED` |
 | `AUTH_ERROR` | Vendor rejects our credentials | `FAILED`, error log, metric (config problem, not delivery problem) |
 
-Retries: max 4 attempts (configurable), exponential backoff with full jitter (`random(0, base * 2^(attempt-1))`, base 2s). `RATE_LIMITED` waits `Retry-After` when the vendor sends it and counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
+Retries: max 4 attempts (configurable), exponential backoff with full jitter (`random(0, base * 2^(attempt-1))`, base 2s). `RATE_LIMITED` waits `Retry-After` when the vendor sends it (clamped to 0..1h) and counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`; checked before every claim too, so a reclaimed row whose attempts are used up fails without a send. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
 
 ### Overall status (derived on read)
 
@@ -464,13 +464,16 @@ sequenceDiagram
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
 - Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
-- The lease is longer than the provider timeout. A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
+- The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 - The poll runs one query per due status (`status = :s and next_attempt_at <= :now order by status, priority, next_attempt_at limit :n`) and merges in Java; a `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001).
-- Rows are worked one at a time: claim, send, outcome. An exception (e.g. a database error) is logged by type and the next row continues; a row left `SENDING` is reclaimed after the lease.
+- Rows are worked one at a time: claim, send, outcome.
+- A row that cannot be sent fails without a claim (conditional on the polled status and version), with an ERROR log by id and a `FAILED` audit: `NO_PROVIDER_ADAPTER`, `NO_ADDRESS`, `MISSING_RECIPIENT`, `MISSING_NOTIFICATION` (no audit: no source system). Any other error before the claim pushes `next_attempt_at` forward (backoff, at least 1s), so a poison row cannot keep sorting first and stall the queue.
+- A provider that throws counts as a `TRANSIENT` failure (code `exception`) and goes through the retry policy. An error after the claim (outcome write) leaves the row `SENDING`; it is reclaimed after the lease.
+- Shutdown: the worker stops between deliveries when the context closes or the thread is interrupted; the poller's scheduler waits `send-timeout` + 5s for the delivery in progress.
 - Each attempt runs under a fresh trace id, so its log lines (ids, channel, category, resulting state) can be grouped. Addresses and content are never logged.
 - `AUTH_ERROR` is also logged at ERROR: it means our credentials are wrong, not the recipient.
 
-Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 4s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`.
+Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 4s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`, or (`lease expired after expiresAt`) for a reclaimed one, which may have been sent.
 
 Worker settings:
 
@@ -480,7 +483,8 @@ nms:
     enabled: true          # NMS_WORKER_ENABLED; off = deliveries stay queued (tests drive runOnce())
     poll-interval: 500ms   # fixed delay between polls; one scheduler thread, polls never overlap
     batch-size: 20         # rows worked per poll
-    lease: 30s             # SENDING older than this is reclaimed and resent
+    lease: 30s             # SENDING older than this is reclaimed and resent; must exceed send-timeout
+    send-timeout: 10s      # adapter contract: send returns within this (TIMEOUT otherwise)
     max-attempts: 4        # including the first (A-40)
     backoff-base: 2s       # retry n waits random(0, base * 2^(n-1)); RATE_LIMITED waits Retry-After if given
 ```
@@ -529,7 +533,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health` (database only; the worker is not part of health) |
-| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when the worker writes `SENT`, `FAILED`, or `EXPIRED`; `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per status, so it saturates at 3 x batch-size), set by the poller with no query per scrape |
+| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `FAILED`, or `EXPIRED`; `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per status, so it saturates at 3 x batch-size), set by the poller with no query per scrape |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
