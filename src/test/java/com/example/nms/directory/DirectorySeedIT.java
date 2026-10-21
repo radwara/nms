@@ -72,6 +72,23 @@ class DirectorySeedIT {
   }
 
   @Test
+  void addressPresenceOfTheDirectoryShapes() {
+    assertThat(
+            recipients.findAddressPresence(
+                List.of("user-ok", "user-email-only", "user-sms-optout", "user-unknown")))
+        .containsExactlyInAnyOrder(
+            new AddressPresence("user-ok", true, true),
+            new AddressPresence("user-email-only", true, false),
+            new AddressPresence("user-sms-optout", true, true));
+  }
+
+  @Test
+  void optOutsListOnlyDisabledChannels() {
+    assertThat(preferences.findOptOuts(List.of("user-ok", "user-email-only", "user-sms-optout")))
+        .containsExactly(new ChannelPreferenceId("user-sms-optout", Channel.SMS));
+  }
+
+  @Test
   void everySendOutcomeIsSeededOnBothChannels() {
     List<Recipient> all = recipients.findAll();
 
