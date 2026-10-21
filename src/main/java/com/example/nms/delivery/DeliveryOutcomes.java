@@ -1,0 +1,109 @@
+package com.example.nms.delivery;
+
+import com.example.nms.audit.AuditRecorder;
+import com.example.nms.common.DeliveryStatus;
+import com.example.nms.intake.Notification;
+import com.example.nms.provider.SendResult.Failed;
+import java.time.Duration;
+import java.time.Instant;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+/**
+ * Outcome writes, each in its own transaction with its audit events. The update is conditional on
+ * the claim's version; {@code false} means another writer changed the row first (a reclaim or a
+ * callback), so nothing is written or audited.
+ */
+@Component
+class DeliveryOutcomes {
+
+  static final String EXPIRED_BEFORE_SEND = "before send";
+  static final String EXPIRED_BEFORE_RETRY = "next attempt after expiresAt";
+
+  private final DeliveryRepository deliveries;
+  private final AuditRecorder audit;
+
+  DeliveryOutcomes(DeliveryRepository deliveries, AuditRecorder audit) {
+    this.deliveries = deliveries;
+    this.audit = audit;
+  }
+
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean sent(Claim claim, String providerMessageId, Instant now) {
+    if (deliveries.markSent(claim.id(), claim.version(), providerMessageId, now) == 0) {
+      return false;
+    }
+    Notification n = claim.notification();
+    audit.sent(n.getSourceSystem(), n.getId(), claim.id(), claim.channel(), now);
+    return true;
+  }
+
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean retry(Claim claim, Failed failure, Instant at, Duration delay, Instant now) {
+    if (deliveries.scheduleRetry(claim.id(), claim.version(), at, now) == 0) {
+      return false;
+    }
+    attemptFailed(claim, failure, now);
+    Notification n = claim.notification();
+    audit.retryScheduled(n.getSourceSystem(), n.getId(), claim.id(), claim.channel(), delay, now);
+    return true;
+  }
+
+  /** {@code reason} is the category, or {@code RETRIES_EXHAUSTED}. */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean failed(Claim claim, Failed failure, String reason, Instant now) {
+    if (finish(claim, DeliveryStatus.FAILED, reason, now) == 0) {
+      return false;
+    }
+    attemptFailed(claim, failure, now);
+    Notification n = claim.notification();
+    audit.failed(n.getSourceSystem(), n.getId(), claim.id(), claim.channel(), reason, now);
+    return true;
+  }
+
+  /** The attempt failed and the next one would fall after {@code expiresAt}. */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean expiredAfterAttempt(Claim claim, Failed failure, Instant now) {
+    if (finish(claim, DeliveryStatus.EXPIRED, null, now) == 0) {
+      return false;
+    }
+    attemptFailed(claim, failure, now);
+    Notification n = claim.notification();
+    audit.expired(
+        n.getSourceSystem(), n.getId(), claim.id(), claim.channel(), EXPIRED_BEFORE_RETRY, now);
+    return true;
+  }
+
+  /** A due delivery already past {@code expiresAt}, as polled (not claimed): no send. */
+  @Transactional(propagation = Propagation.REQUIRES_NEW)
+  public boolean expiredBeforeSend(Delivery due, Notification n, Instant now) {
+    int updated =
+        deliveries.finish(
+            due.getId(), due.getStatus(), due.getVersion(), DeliveryStatus.EXPIRED, null, now);
+    if (updated == 0) {
+      return false;
+    }
+    audit.expired(
+        n.getSourceSystem(), n.getId(), due.getId(), due.getChannel(), EXPIRED_BEFORE_SEND, now);
+    return true;
+  }
+
+  private int finish(Claim claim, DeliveryStatus status, String reason, Instant now) {
+    return deliveries.finish(
+        claim.id(), DeliveryStatus.SENDING, claim.version(), status, reason, now);
+  }
+
+  private void attemptFailed(Claim claim, Failed failure, Instant now) {
+    Notification n = claim.notification();
+    audit.attemptFailed(
+        n.getSourceSystem(),
+        n.getId(),
+        claim.id(),
+        claim.channel(),
+        claim.attempt(),
+        failure.category().name(),
+        failure.providerCode(),
+        now);
+  }
+}
