@@ -62,11 +62,13 @@ class ApiExceptionHandler {
   @ExceptionHandler(HttpMessageNotReadableException.class)
   void notReadable(HttpMessageNotReadableException ex, HttpServletResponse response)
       throws IOException {
-    if (ex.getCause() instanceof MismatchedInputException mismatch) {
-      writer.write(response, ApiError.of(ErrorCode.INVALID_VALUE, jsonPath(mismatch)));
-    } else {
-      writer.write(response, ApiError.of(ErrorCode.MALFORMED_JSON));
-    }
+    writer.write(response, notReadableError(ex));
+  }
+
+  static ApiError notReadableError(HttpMessageNotReadableException ex) {
+    return ex.getCause() instanceof MismatchedInputException mismatch
+        ? ApiError.of(ErrorCode.INVALID_VALUE, jsonPath(mismatch))
+        : ApiError.of(ErrorCode.MALFORMED_JSON);
   }
 
   @ExceptionHandler(MissingRequestHeaderException.class)
