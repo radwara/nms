@@ -71,6 +71,8 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 }
 ```
 
+- Required (spec 4.1): `eventId`, `type`, `severity` (INFO, WARNING, CRITICAL), `priority` (LOW, NORMAL, HIGH), `recipients`, `subject`, `body`. Optional: `scheduledAt`, `expiresAt`, per-recipient `channels`. No server-side defaults for spec fields.
+- `severity` drives routing; `priority` drives worker claim order under backlog.
 - Each recipient carries its own optional `channels`. When absent, the recipient's enabled channels from the directory are used. Contact addresses always come from the directory, never the request.
 - One notification is created per recipient. All notifications from one request share an internal `submissionId` (not exposed).
 - `202` on a new submission, `200` on an idempotent replay (same key, same payload) with the same body.
