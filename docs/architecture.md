@@ -312,3 +312,42 @@ sequenceDiagram
 ```
 
 Unmatched events cover the race where a vendor calls back before our `SENT` write commits.
+
+## Security
+
+- Source systems: hashed, rotatable API keys; `sourceSystem` comes from the key, never the body (ADR-0001).
+- Webhooks: shared secret token per provider in `X-Webhook-Token`, checked the same way. Production: verify each vendor's own signature (ADR-0003).
+- Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
+- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation, request size limit.
+- Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
+- Secrets come from environment variables; nothing secret is committed.
+- Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
+
+## Operations
+
+| Signal | Detail |
+|---|---|
+| Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
+| Logs | Structured JSON; ids and outcome categories only |
+| Health | `/actuator/health` (database, worker liveness) |
+| Metrics | `nms.notifications.accepted`, `nms.deliveries.outcome{channel,status}`, `nms.delivery.attempts{channel,category}`, `nms.deliveries.due` (backlog gauge), `nms.webhook.events{provider,result}`, `nms.auth.failures` |
+
+What to alert on:
+- `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
+- Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
+- Spike in unmatched or rejected webhook events: misconfiguration or forged callbacks.
+
+## Scaling path (not built)
+
+| Concern | Prototype | Production |
+|---|---|---|
+| Database | H2 | PostgreSQL |
+| Work claiming | Conditional update on `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
+| Throughput | One instance, worker thread pool | Horizontal instances; per-channel worker pools |
+| Provider limits | Retry on 429 | Token bucket per provider |
+| Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
+| Retention | Idempotency purge job | Partitioned audit tables, archival |
+
+## Out of scope
+
+Cancel, list/search, preferences API, templates and localization, engagement events (open/click), quiet hours, bulk sends above 100 recipients, real vendor integrations.
