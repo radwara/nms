@@ -1,8 +1,9 @@
-package com.example.nms.common;
+package com.example.nms.delivery;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.example.nms.common.Priority;
 import org.junit.jupiter.api.Test;
 
 /** #7: delivery priority is stored as HIGH=0, NORMAL=1, LOW=2 so the poll sorts ascending. */

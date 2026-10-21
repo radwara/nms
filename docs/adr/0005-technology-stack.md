@@ -30,7 +30,7 @@ The role centers on Java and Spring Boot. Reviewers must be able to run the prot
 | Tests | JUnit 5, Spring Boot Test, MockMvc, Awaitility | Unit, slice, and end-to-end tests for async flows |
 | CI | GitHub Actions: format check, build, tests, JaCoCo report artifact, Docker image build (non-root user); Dependabot for Maven and Actions | Docker is not installed locally; CI verifies the Dockerfile |
 
-Single module, packaged by feature (`api`, `intake`, `routing`, `delivery`, `provider`, `callback`, `status`, `audit`, `directory`, `security`).
+Single module, packaged by feature (`api`, `intake`, `routing`, `delivery`, `provider`, `callback`, `status`, `audit`, `directory`, `security`), plus `common`: shared vocabulary enums only, no logic.
 
 ## Consequences
 

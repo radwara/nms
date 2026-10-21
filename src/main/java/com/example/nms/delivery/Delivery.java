@@ -3,7 +3,6 @@ package com.example.nms.delivery;
 import com.example.nms.common.Channel;
 import com.example.nms.common.DeliveryStatus;
 import com.example.nms.common.Priority;
-import com.example.nms.common.PriorityCodeConverter;
 import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;

@@ -1,5 +1,6 @@
-package com.example.nms.common;
+package com.example.nms.delivery;
 
+import com.example.nms.common.Priority;
 import jakarta.persistence.AttributeConverter;
 import jakarta.persistence.Converter;
 
