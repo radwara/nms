@@ -10,7 +10,8 @@ logging:
   pattern:
     correlation: "[%X{traceId:-}] "
 
-# Demo keys only (plaintext in ADR-0001). NMS_API_KEYS still overrides them.
+# Demo credentials only (plaintext in ADR-0001). NMS_API_KEYS and NMS_WEBHOOK_TOKENS override them.
 nms:
   security:
     api-keys: ${NMS_API_KEYS:demo1:demo-app:4530bfad54b2432bdec5406b7f9f668987e2697b931ed715f965f6c02aec995b,demo2:demo-app:3a83b1837de2e6b4cda334d357681460a2289f1fae9702354878758b2a79e807,other1:other-app:71da12377d22bca88514fa361590393bced31ac0b2a780f9056ea71f0ff67449}
+    webhook-tokens: ${NMS_WEBHOOK_TOKENS:sim-email:5c9ac007d6f67bc94368c689920c9acd1c3f88de2df4222f0db1fe4d3bc009c2,sim-sms:1147d6b92d1b6fca9d2f527334822413df6a71b07e0a5b69d5c12cea5136d1c7}

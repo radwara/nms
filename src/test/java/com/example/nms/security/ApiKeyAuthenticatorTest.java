@@ -1,5 +1,8 @@
 package com.example.nms.security;
 
+import static com.example.nms.support.TestApiKeys.DEMO1;
+import static com.example.nms.support.TestApiKeys.DEMO2;
+import static com.example.nms.support.TestApiKeys.sha256Hex;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.List;
@@ -9,26 +12,27 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 class ApiKeyAuthenticatorTest {
 
-  // SHA-256 of the full keys nms_demo1_dev-only, nms_demo2_dev-only, and nms_under_sc_re.
+  private static final String UNDERSCORED = "nms_under_sc_re";
+
   private static final ApiKeyAuthenticator AUTHENTICATOR =
       new ApiKeyAuthenticator(
-          ApiKeyConfigParser.parse(
-              "demo1:demo-app:4530bfad54b2432bdec5406b7f9f668987e2697b931ed715f965f6c02aec995b,"
-                  + "demo2:demo-app:3a83b1837de2e6b4cda334d357681460a2289f1fae9702354878758b2a79e807,"
-                  + "under:other-app:3140e1461098878b3a0827d4b20e5da4e9fe790ca04f8637d8f3e37ed0d4d43a"));
+          CredentialsConfigParser.apiKeys(
+              "demo1:demo-app:"
+                  + sha256Hex(DEMO1)
+                  + ",demo2:demo-app:"
+                  + sha256Hex(DEMO2)
+                  + ",under:other-app:"
+                  + sha256Hex(UNDERSCORED)));
 
   @Test
   void validKeysResolveToTheirSourceSystem() {
-    assertThat(AUTHENTICATOR.authenticate("nms_demo1_dev-only"))
-        .contains(new SourceSystem("demo-app"));
-    assertThat(AUTHENTICATOR.authenticate("nms_demo2_dev-only"))
-        .contains(new SourceSystem("demo-app"));
+    assertThat(AUTHENTICATOR.authenticate(DEMO1)).contains(new SourceSystem("demo-app"));
+    assertThat(AUTHENTICATOR.authenticate(DEMO2)).contains(new SourceSystem("demo-app"));
   }
 
   @Test
   void secretMayContainUnderscores() {
-    assertThat(AUTHENTICATOR.authenticate("nms_under_sc_re"))
-        .contains(new SourceSystem("other-app"));
+    assertThat(AUTHENTICATOR.authenticate(UNDERSCORED)).contains(new SourceSystem("other-app"));
   }
 
   @ParameterizedTest
@@ -49,6 +53,6 @@ class ApiKeyAuthenticatorTest {
 
   @Test
   void noConfiguredKeysRejectsEverything() {
-    assertThat(new ApiKeyAuthenticator(List.of()).authenticate("nms_demo1_dev-only")).isEmpty();
+    assertThat(new ApiKeyAuthenticator(List.of()).authenticate(DEMO1)).isEmpty();
   }
 }
