@@ -7,13 +7,12 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * A validated submission. {@code sourceSystem} comes from the API key; {@code requestHash} is the
- * {@link RequestHash} of the parsed body. Recipient order is the request order.
+ * A validated submission. {@code sourceSystem} comes from the API key. Recipient order is the
+ * request order. Its {@link RequestHash} decides whether a reused key is a replay.
  */
 public record SubmitCommand(
     String sourceSystem,
     String idempotencyKey,
-    String requestHash,
     String eventId,
     String type,
     Severity severity,

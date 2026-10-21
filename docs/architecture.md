@@ -77,7 +77,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 - One notification is created per recipient. All notifications from one request share an internal `submissionId` (not exposed).
 - `202` on a new submission, `200` on an idempotent replay (same key, same payload) with the same body.
 - Limits: `recipients` 1..100 with distinct `userId` (max 64), `eventId` <= 128, `type` <= 64, `subject` <= 200, `body` <= 5000, `Idempotency-Key` <= 128. `channels`, when given, is a non-empty list of distinct channels; omit it to use preferences.
-- Timestamps: ISO-8601 with offset or zone (e.g. `2026-10-21T10:00:00Z`), years 1..9999, stored at microsecond precision. Unknown properties (including `sourceSystem`) are ignored.
+- Timestamps: ISO-8601 with offset or zone (e.g. `2026-10-21T10:00:00Z`), years 1..9999, stored at microsecond precision. Unknown properties (including `sourceSystem`) are ignored, also by the idempotency hash.
 - Keys are honored for `nms.idempotency.retention` (default `7d`, env `NMS_IDEMPOTENCY_RETENTION`). A retry of an accepted request replays even after its `expiresAt` has passed: time rules apply to new submissions only.
 
 ```json
@@ -258,7 +258,7 @@ Seeded recipients:
 |---|---|---|
 | `id` | bigint PK | |
 | `source_system`, `idempotency_key` | varchar(64), varchar(128) | Unique together. Longer keys rejected (4003) |
-| `request_hash` | char(64) | SHA-256 of the canonical parsed request (not raw bytes, so whitespace and key order do not cause false conflicts) |
+| `request_hash` | char(64) | SHA-256 of the canonical validated request: recognised fields only, null = absent, timestamps as UTC instants, recipient and channel order kept. Unknown properties, whitespace, and key order cannot cause false conflicts |
 | `submission_id` | uuid | Links to the notifications created |
 | `created_at`, `expires_at` | timestamp | Kept 7 days. Lookups ignore expired rows; an expired row is replaced in the same transaction via a conditional update. No purge job; purge is the production path |
 

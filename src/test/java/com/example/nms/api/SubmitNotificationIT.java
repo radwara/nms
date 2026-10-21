@@ -133,6 +133,51 @@ class SubmitNotificationIT {
   }
 
   @Test
+  void replayIgnoresUnknownProperties() {
+    String key = newKey();
+    ObjectNode body = valid("user-ok");
+    body.put("sourceSystem", "first");
+    List<Map.Entry<String, UUID>> original = ids(submit(DEMO1, key, body.toString()));
+    body.put("sourceSystem", "second");
+    body.put("unknownField", 42);
+
+    MvcTestResult replay = submit(DEMO1, key, body.toString());
+
+    assertThat(replay).hasStatus(200);
+    assertThat(ids(replay)).isEqualTo(original);
+  }
+
+  @Test
+  void replayTreatsNullAndAbsentOptionalFieldsAlike() {
+    String key = newKey();
+    ObjectNode body = valid("user-ok");
+    body.putNull("scheduledAt");
+    ((ObjectNode) body.get("recipients").get(0)).putNull("channels");
+    List<Map.Entry<String, UUID>> original = ids(submit(DEMO1, key, body.toString()));
+    body.remove("scheduledAt");
+    ((ObjectNode) body.get("recipients").get(0)).remove("channels");
+
+    MvcTestResult replay = submit(DEMO1, key, body.toString());
+
+    assertThat(replay).hasStatus(200);
+    assertThat(ids(replay)).isEqualTo(original);
+  }
+
+  @Test
+  void replayTreatsTheSameInstantInAnotherOffsetAlike() {
+    String key = newKey();
+    ObjectNode body = valid("user-ok");
+    body.put("expiresAt", "2099-01-01T12:00:00Z");
+    List<Map.Entry<String, UUID>> original = ids(submit(DEMO1, key, body.toString()));
+    body.put("expiresAt", "2099-01-01T14:00:00.000+02:00");
+
+    MvcTestResult replay = submit(DEMO1, key, body.toString());
+
+    assertThat(replay).hasStatus(200);
+    assertThat(ids(replay)).isEqualTo(original);
+  }
+
+  @Test
   void replayListsNotificationsInTheRequestsRecipientOrder() {
     String key = newKey();
     String body =

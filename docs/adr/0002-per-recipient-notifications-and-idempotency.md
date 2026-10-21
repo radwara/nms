@@ -20,7 +20,7 @@ Spec 4.1 requires a request to accept one or more recipients. Spec 4.4 requires 
 **B.**
 
 - `recipients` is a list of `{ userId, channels? }`, max 100. Each entry becomes one `Notification`.
-- `Idempotency-Key` header is required, scoped per source system. Stored in `IdempotencyRecord` with a SHA-256 hash of the canonical parsed request (whitespace and key order do not matter) and the `submissionId`.
+- `Idempotency-Key` header is required, scoped per source system. Stored in `IdempotencyRecord` with a SHA-256 hash of the canonical validated request (recognised fields only, so unknown properties, whitespace, and key order do not matter; null and absent are the same; timestamps normalized to UTC) and the `submissionId`.
 - Same key, same hash: `200` with the original notification ids, `DUPLICATE_SUBMISSION` audited on each. Same key, different hash: `409 / 4091`.
 - The idempotency record and all notifications are written in one transaction.
 - Any unknown recipient rejects the whole request (`422 / 4223`). One key maps to at most one accepted submission; rejections are not stored, so a corrected retry with the same key can succeed.

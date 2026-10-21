@@ -6,7 +6,6 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import com.example.nms.common.Channel;
 import com.example.nms.common.Priority;
 import com.example.nms.common.Severity;
-import com.example.nms.intake.RequestHash;
 import com.example.nms.intake.SubmitCommand;
 import com.example.nms.security.SourceSystem;
 import java.time.Instant;
@@ -37,7 +36,6 @@ class SubmitRequestValidatorTest {
 
     assertThat(command.sourceSystem()).isEqualTo("demo-app");
     assertThat(command.idempotencyKey()).isEqualTo("key-1");
-    assertThat(command.requestHash()).isEqualTo(RequestHash.of(body));
     assertThat(command.severity()).isEqualTo(Severity.CRITICAL);
     assertThat(command.priority()).isEqualTo(Priority.HIGH);
     assertThat(command.recipients())

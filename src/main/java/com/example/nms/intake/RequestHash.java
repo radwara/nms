@@ -2,52 +2,57 @@ package com.example.nms.intake;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
+import java.time.Instant;
 import java.util.HexFormat;
-import java.util.List;
-import java.util.Map;
-import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.databind.node.ArrayNode;
-import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * SHA-256 (lowercase hex) of a parsed request re-serialized with object keys sorted, so whitespace
- * and key order do not change the hash. Array order is kept: recipient order is part of the
- * payload.
+ * SHA-256 (lowercase hex) of a submission's canonical form, built from the validated fields only:
+ * unknown properties, whitespace, and key order cannot change it; an absent and a null optional
+ * field are the same; timestamps are UTC instants. Recipient and channel order are kept: they are
+ * part of the payload. The source system and key are the record's identity, not its payload.
  */
 public final class RequestHash {
 
-  private static final JsonMapper MAPPER = JsonMapper.shared();
-  private static final JsonNodeFactory NODES = JsonNodeFactory.instance;
-
   private RequestHash() {}
 
-  public static String of(JsonNode request) {
-    byte[] canonical = MAPPER.writeValueAsBytes(canonical(request));
+  public static String of(SubmitCommand command) {
+    byte[] canonical = JsonMapper.shared().writeValueAsBytes(canonical(command));
     try {
-      byte[] digest = MessageDigest.getInstance("SHA-256").digest(canonical);
-      return HexFormat.of().formatHex(digest);
+      return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException("SHA-256 is required by the Java platform", e);
     }
   }
 
-  /** A copy with every object's properties inserted in key order. */
-  static JsonNode canonical(JsonNode node) {
-    if (node.isObject()) {
-      List<Map.Entry<String, JsonNode>> properties = new ArrayList<>(node.properties());
-      properties.sort(Map.Entry.comparingByKey());
-      ObjectNode sorted = NODES.objectNode();
-      properties.forEach(p -> sorted.set(p.getKey(), canonical(p.getValue())));
-      return sorted;
+  /** Properties in key order. */
+  static ObjectNode canonical(SubmitCommand command) {
+    ObjectNode node = JsonMapper.shared().createObjectNode();
+    node.put("body", command.body());
+    node.put("eventId", command.eventId());
+    node.put("expiresAt", iso(command.expiresAt()));
+    node.put("priority", command.priority().name());
+    ArrayNode recipients = node.putArray("recipients");
+    for (SubmitCommand.Recipient recipient : command.recipients()) {
+      ObjectNode entry = recipients.addObject();
+      if (recipient.channels() == null) {
+        entry.putNull("channels");
+      } else {
+        ArrayNode channels = entry.putArray("channels");
+        recipient.channels().forEach(channel -> channels.add(channel.name()));
+      }
+      entry.put("userId", recipient.userId());
     }
-    if (node.isArray()) {
-      ArrayNode copy = NODES.arrayNode(node.size());
-      node.values().forEach(element -> copy.add(canonical(element)));
-      return copy;
-    }
+    node.put("scheduledAt", iso(command.scheduledAt()));
+    node.put("severity", command.severity().name());
+    node.put("subject", command.subject());
+    node.put("type", command.type());
     return node;
+  }
+
+  private static String iso(Instant instant) {
+    return instant == null ? null : instant.toString();
   }
 }

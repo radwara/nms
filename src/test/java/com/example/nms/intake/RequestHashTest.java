@@ -3,56 +3,92 @@ package com.example.nms.intake;
 import static com.example.nms.support.TestApiKeys.sha256Hex;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.nms.common.Channel;
+import com.example.nms.common.Priority;
+import com.example.nms.common.Severity;
+import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.json.JsonMapper;
 
-/** #8: canonical request hash. */
+/** #8: canonical hash over the validated fields. */
 class RequestHashTest {
 
-  private static final String REQUEST =
-      "{\"eventId\":\"e\",\"recipients\":[{\"userId\":\"a\",\"channels\":[\"SMS\",\"EMAIL\"]},"
-          + "{\"userId\":\"b\"}],\"scheduledAt\":null}";
+  private static final Instant EXPIRES = Instant.parse("2026-10-22T10:00:00Z");
 
   @Test
-  void isLowercaseHexSha256OfTheSortedKeyForm() {
+  void isLowercaseHexSha256OfTheCanonicalForm() {
     String canonical =
-        "{\"eventId\":\"e\",\"recipients\":[{\"channels\":[\"SMS\",\"EMAIL\"],\"userId\":\"a\"},"
-            + "{\"userId\":\"b\"}],\"scheduledAt\":null}";
+        "{\"body\":\"b\",\"eventId\":\"e\",\"expiresAt\":\"2026-10-22T10:00:00Z\","
+            + "\"priority\":\"HIGH\",\"recipients\":[{\"channels\":[\"SMS\",\"EMAIL\"],"
+            + "\"userId\":\"a\"},{\"channels\":null,\"userId\":\"b\"}],\"scheduledAt\":null,"
+            + "\"severity\":\"CRITICAL\",\"subject\":\"s\",\"type\":\"t\"}";
 
-    assertThat(RequestHash.of(parse(REQUEST))).hasSize(64).isEqualTo(sha256Hex(canonical));
+    assertThat(RequestHash.of(command(recipients(), null, EXPIRES)))
+        .hasSize(64)
+        .isEqualTo(sha256Hex(canonical));
   }
 
   @Test
-  void ignoresWhitespaceAndKeyOrderAtEveryLevel() {
-    String reordered =
-        "{\n  \"scheduledAt\" : null,\n  \"recipients\" : [ { \"channels\" : [ \"SMS\", \"EMAIL\" ],"
-            + " \"userId\" : \"a\" }, { \"userId\" : \"b\" } ],\n  \"eventId\" : \"e\"\n}";
+  void sourceSystemAndKeyAreNotPartOfThePayload() {
+    SubmitCommand base = command(recipients(), null, EXPIRES);
+    SubmitCommand other =
+        new SubmitCommand(
+            "other-app",
+            "other-key",
+            base.eventId(),
+            base.type(),
+            base.severity(),
+            base.priority(),
+            base.recipients(),
+            base.subject(),
+            base.body(),
+            base.scheduledAt(),
+            base.expiresAt());
 
-    assertThat(RequestHash.of(parse(reordered))).isEqualTo(RequestHash.of(parse(REQUEST)));
+    assertThat(RequestHash.of(other)).isEqualTo(RequestHash.of(base));
   }
 
   @Test
-  void arrayOrderMatters() {
-    String recipientsSwapped =
-        "{\"eventId\":\"e\",\"recipients\":[{\"userId\":\"b\"},"
-            + "{\"userId\":\"a\",\"channels\":[\"SMS\",\"EMAIL\"]}],\"scheduledAt\":null}";
-    String channelsSwapped = REQUEST.replace("[\"SMS\",\"EMAIL\"]", "[\"EMAIL\",\"SMS\"]");
+  void recipientAndChannelOrderMatter() {
+    String hash = RequestHash.of(command(recipients(), null, EXPIRES));
+    List<SubmitCommand.Recipient> swappedRecipients =
+        List.of(recipients().get(1), recipients().get(0));
+    List<SubmitCommand.Recipient> swappedChannels =
+        List.of(
+            new SubmitCommand.Recipient("a", List.of(Channel.EMAIL, Channel.SMS)),
+            recipients().get(1));
 
-    assertThat(RequestHash.of(parse(recipientsSwapped)))
-        .isNotEqualTo(RequestHash.of(parse(REQUEST)));
-    assertThat(RequestHash.of(parse(channelsSwapped))).isNotEqualTo(RequestHash.of(parse(REQUEST)));
+    assertThat(RequestHash.of(command(swappedRecipients, null, EXPIRES))).isNotEqualTo(hash);
+    assertThat(RequestHash.of(command(swappedChannels, null, EXPIRES))).isNotEqualTo(hash);
   }
 
   @Test
-  void anyValueChangeMatters() {
-    assertThat(RequestHash.of(parse(REQUEST.replace("\"e\"", "\"f\""))))
-        .isNotEqualTo(RequestHash.of(parse(REQUEST)));
-    assertThat(RequestHash.of(parse(REQUEST.replace(",\"scheduledAt\":null", ""))))
-        .isNotEqualTo(RequestHash.of(parse(REQUEST)));
+  void optionalValuesChangeTheHash() {
+    String hash = RequestHash.of(command(recipients(), null, EXPIRES));
+
+    assertThat(RequestHash.of(command(recipients(), EXPIRES, EXPIRES))).isNotEqualTo(hash);
+    assertThat(RequestHash.of(command(recipients(), null, null))).isNotEqualTo(hash);
   }
 
-  private static JsonNode parse(String json) {
-    return JsonMapper.shared().readTree(json);
+  private static List<SubmitCommand.Recipient> recipients() {
+    return List.of(
+        new SubmitCommand.Recipient("a", List.of(Channel.SMS, Channel.EMAIL)),
+        new SubmitCommand.Recipient("b", null));
+  }
+
+  private static SubmitCommand command(
+      List<SubmitCommand.Recipient> recipients, Instant scheduledAt, Instant expiresAt) {
+    return new SubmitCommand(
+        "demo-app",
+        "key",
+        "e",
+        "t",
+        Severity.CRITICAL,
+        Priority.HIGH,
+        recipients,
+        "s",
+        "b",
+        scheduledAt,
+        expiresAt);
   }
 }

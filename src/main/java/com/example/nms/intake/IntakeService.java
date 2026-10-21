@@ -67,11 +67,12 @@ public class IntakeService {
   }
 
   public SubmitResult submit(SubmitCommand command) {
+    String requestHash = RequestHash.of(command);
     try {
-      return transaction.execute(status -> attempt(command));
+      return transaction.execute(status -> attempt(command, requestHash));
     } catch (DataIntegrityViolationException | KeyClaimedConcurrently e) {
       // Outside the failed transaction: the winner has committed, so its record is visible.
-      SubmitResult result = transaction.execute(status -> replayLiveRecord(command));
+      SubmitResult result = transaction.execute(status -> replayLiveRecord(command, requestHash));
       if (result == null) {
         throw e; // not a lost race on the key
       }
@@ -80,13 +81,13 @@ public class IntakeService {
     }
   }
 
-  private SubmitResult attempt(SubmitCommand command) {
+  private SubmitResult attempt(SubmitCommand command, String requestHash) {
     Instant now = now();
     Optional<IdempotencyRecord> existing =
         records.findBySourceSystemAndIdempotencyKey(
             command.sourceSystem(), command.idempotencyKey());
     if (existing.isPresent() && existing.get().isLiveAt(now)) {
-      return replayOrConflict(existing.get(), command, now);
+      return replayOrConflict(existing.get(), command, requestHash, now);
     }
     // The rules below apply to new submissions only; a replay was answered above.
     List<TimeViolation> violations = TimeViolation.of(command, now);
@@ -99,7 +100,7 @@ public class IntakeService {
     }
 
     UUID submissionId = UUID.randomUUID();
-    claimKey(command, existing.isPresent(), submissionId, now);
+    claimKey(command, requestHash, existing.isPresent(), submissionId, now);
     List<Notification> created =
         command.recipients().stream()
             .map(recipient -> notification(command, recipient, submissionId, now))
@@ -121,21 +122,25 @@ public class IntakeService {
 
   /** Writes the record first: a concurrent claim of the same key fails here, before any content. */
   private void claimKey(
-      SubmitCommand command, boolean expiredRecordExists, UUID submissionId, Instant now) {
+      SubmitCommand command,
+      String requestHash,
+      boolean expiredRecordExists,
+      UUID submissionId,
+      Instant now) {
     Instant expiresAt = now.plus(retention);
     if (!expiredRecordExists) {
       records.saveAndFlush(
           new IdempotencyRecord(
               command.sourceSystem(),
               command.idempotencyKey(),
-              command.requestHash(),
+              requestHash,
               submissionId,
               now,
               expiresAt));
     } else if (records.replaceExpired(
             command.sourceSystem(),
             command.idempotencyKey(),
-            command.requestHash(),
+            requestHash,
             submissionId,
             now,
             expiresAt)
@@ -145,18 +150,18 @@ public class IntakeService {
   }
 
   /** Replay or conflict against a live record, or {@code null} when there is none. */
-  private SubmitResult replayLiveRecord(SubmitCommand command) {
+  private SubmitResult replayLiveRecord(SubmitCommand command, String requestHash) {
     Instant now = now();
     return records
         .findBySourceSystemAndIdempotencyKey(command.sourceSystem(), command.idempotencyKey())
         .filter(record -> record.isLiveAt(now))
-        .map(record -> replayOrConflict(record, command, now))
+        .map(record -> replayOrConflict(record, command, requestHash, now))
         .orElse(null);
   }
 
   private SubmitResult replayOrConflict(
-      IdempotencyRecord record, SubmitCommand command, Instant now) {
-    if (!record.getRequestHash().equals(command.requestHash())) {
+      IdempotencyRecord record, SubmitCommand command, String requestHash, Instant now) {
+    if (!record.getRequestHash().equals(requestHash)) {
       return new KeyConflict();
     }
     Map<String, SubmittedNotification> byRecipient =

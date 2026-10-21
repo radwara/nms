@@ -54,7 +54,6 @@ class IntakeServiceIT {
     return new SubmitCommand(
         "demo-app",
         "key-" + UUID.randomUUID(),
-        "a".repeat(64),
         "evt-1",
         "FRAUD_ALERT",
         Severity.INFO,

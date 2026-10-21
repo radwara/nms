@@ -3,7 +3,6 @@ package com.example.nms.api;
 import com.example.nms.common.Channel;
 import com.example.nms.common.Priority;
 import com.example.nms.common.Severity;
-import com.example.nms.intake.RequestHash;
 import com.example.nms.intake.SubmitCommand;
 import com.example.nms.security.SourceSystem;
 import java.time.DateTimeException;
@@ -67,7 +66,6 @@ class SubmitRequestValidator {
     return new SubmitCommand(
         source.name(),
         key,
-        RequestHash.of(body),
         eventId,
         type,
         severity,
