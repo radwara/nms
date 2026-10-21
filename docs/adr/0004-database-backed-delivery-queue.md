@@ -21,7 +21,7 @@ The `delivery` table is the queue.
 
 - A scheduled worker polls for due rows (`PENDING` or `RETRY_SCHEDULED`, `nextAttemptAt <= now`), ordered by priority then due time, in small batches.
 - One single-threaded poller. A row is claimed with a conditional update (`status = SENDING`, `claimed_at = now`), committed before the send. Only one claimer wins.
-- Every claim, outcome, and callback write is conditional on `id`, expected `status`, and `version`, and increments `version` and sets `updated_at`. A slow worker whose lease was reclaimed cannot overwrite newer state: the reclaim bumped `version`.
+- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`. Every write increments `version` and sets `updated_at`. A slow worker whose lease was reclaimed cannot overwrite newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`).
 - Persisted timestamps come from an injected `Clock` truncated to microseconds (database precision).
 - Scheduling is `nextAttemptAt = scheduledAt`; a retry is `nextAttemptAt = now + backoff`.

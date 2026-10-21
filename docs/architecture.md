@@ -286,7 +286,7 @@ No status column: overall status is derived from deliveries.
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
 | `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
-| `version` | bigint | Concurrency token. Every claim, outcome, and callback write is conditional on `id`, expected `status`, and `version`, and increments `version` and sets `updated_at` |
+| `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id` and `status in (SENDING, SENT)` only (final states never change). Every write increments `version` and sets `updated_at` |
 
 ### Audit
 
@@ -416,7 +416,7 @@ sequenceDiagram
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
-- Every claim, outcome, and callback write is conditional on `id`, expected `status`, and `version`, and increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
+- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout. A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 
@@ -429,7 +429,7 @@ sequenceDiagram
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
     H->>H: authenticate, validate
-    H->>D: update delivery (final status, providerMessageId, version + 1) where id = deliveryId, status in (SENDING, SENT), and version match
+    H->>D: update delivery (final status, providerMessageId, version + 1) where id = deliveryId and status in (SENDING, SENT)
     alt one row updated
         H->>D: audit DELIVERED or FAILED
     else delivery already final
