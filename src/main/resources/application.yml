@@ -28,6 +28,10 @@ management:
         include: health,info,prometheus
 
 logging:
+  level:
+    # Hibernate logs JDBC errors with their message, which quotes column values (e.g. a duplicate
+    # key). The exception still propagates and is logged redacted where it is handled.
+    org.hibernate.orm.jdbc.error: OFF
   structured:
     format:
       console: ecs

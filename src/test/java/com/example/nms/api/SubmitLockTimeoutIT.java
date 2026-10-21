@@ -18,8 +18,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -37,6 +40,7 @@ import tools.jackson.databind.json.JsonMapper;
         "spring.datasource.url=jdbc:h2:mem:${random.uuid};MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;"
             + "DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=200")
 @Import(RoutingGate.Configuration.class)
+@ExtendWith(OutputCaptureExtension.class)
 class SubmitLockTimeoutIT {
 
   @LocalServerPort private int port;
@@ -52,12 +56,12 @@ class SubmitLockTimeoutIT {
   }
 
   @Test
-  void newKeyStillLockedIs4092ThenReplays() throws Exception {
-    assertInProgressThenReplay(newKey());
+  void newKeyStillLockedIs4092ThenReplays(CapturedOutput output) throws Exception {
+    assertInProgressThenReplay(newKey(), output);
   }
 
   @Test
-  void expiredKeyStillLockedIs4092ThenReplays() throws Exception {
+  void expiredKeyStillLockedIs4092ThenReplays(CapturedOutput output) throws Exception {
     String key = newKey();
     Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
     records.saveAndFlush(
@@ -69,10 +73,10 @@ class SubmitLockTimeoutIT {
             now.minus(Duration.ofDays(8)),
             now.minus(Duration.ofDays(1))));
 
-    assertInProgressThenReplay(key);
+    assertInProgressThenReplay(key, output);
   }
 
-  private void assertInProgressThenReplay(String key) throws Exception {
+  private void assertInProgressThenReplay(String key, CapturedOutput output) throws Exception {
     String body = valid("user-ok").toString();
     gate.arm();
     CompletableFuture<HttpResponse<String>> first = RoutingGate.submit(http, port, key, body);
@@ -99,5 +103,7 @@ class SubmitLockTimeoutIT {
         .isEqualTo(JsonMapper.shared().readTree(winner.body()));
     assertThat(jdbc.queryForObject("select count(*) from notification", Integer.class))
         .isEqualTo(1);
+    // Database errors quote the duplicate key; they must not reach the logs.
+    assertThat(output.getAll()).doesNotContain(key);
   }
 }

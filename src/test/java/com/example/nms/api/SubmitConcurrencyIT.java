@@ -18,8 +18,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,6 +36,7 @@ import tools.jackson.databind.json.JsonMapper;
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(RoutingGate.Configuration.class)
+@ExtendWith(OutputCaptureExtension.class)
 class SubmitConcurrencyIT {
 
   /** Long enough for the second request to reach the key's lock, well under H2's lock timeout. */
@@ -51,12 +55,13 @@ class SubmitConcurrencyIT {
   }
 
   @Test
-  void sameNewKeyCreatesOnceAndTheLoserReplaysTheWinner() throws Exception {
-    assertOneCreatesAndOneReplays(newKey());
+  void sameNewKeyCreatesOnceAndTheLoserReplaysTheWinner(CapturedOutput output) throws Exception {
+    assertOneCreatesAndOneReplays(newKey(), output);
   }
 
   @Test
-  void sameExpiredKeyIsTakenOverOnceAndTheLoserReplaysTheWinner() throws Exception {
+  void sameExpiredKeyIsTakenOverOnceAndTheLoserReplaysTheWinner(CapturedOutput output)
+      throws Exception {
     String key = newKey();
     Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
     records.saveAndFlush(
@@ -68,13 +73,13 @@ class SubmitConcurrencyIT {
             now.minus(Duration.ofDays(8)),
             now.minus(Duration.ofDays(1))));
 
-    assertOneCreatesAndOneReplays(key);
+    assertOneCreatesAndOneReplays(key, output);
 
     assertThat(jdbc.queryForObject("select count(*) from idempotency_record", Integer.class))
         .isEqualTo(1);
   }
 
-  private void assertOneCreatesAndOneReplays(String key) throws Exception {
+  private void assertOneCreatesAndOneReplays(String key, CapturedOutput output) throws Exception {
     String body = valid("user-ok", "user-email-only").toString();
     gate.arm();
 
@@ -98,6 +103,8 @@ class SubmitConcurrencyIT {
                 "select count(*) from audit_event where type = 'DUPLICATE_SUBMISSION'",
                 Integer.class))
         .isEqualTo(2);
+    // Database errors quote the duplicate key; they must not reach the logs.
+    assertThat(output.getAll()).doesNotContain(key);
   }
 
   private static JsonNode notifications(HttpResponse<String> response) {
