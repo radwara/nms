@@ -447,10 +447,11 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 - Source systems: hashed, rotatable API keys; `sourceSystem` comes from the key, never the body (ADR-0001).
 - Webhooks: shared secret token per provider in `X-Webhook-Token`, checked the same way. Production: verify each vendor's own signature (ADR-0003).
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
-- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation, request size limit.
+- Input limits: max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
 - Secrets come from environment variables; nothing secret is committed.
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
+- Actuator is outside API-key auth; `health` is public; in production actuator is served on an internal management port.
 
 ## Operations
 
