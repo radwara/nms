@@ -132,7 +132,7 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 
 - `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`.
 - Dedupe by state: only a `SENT` delivery changes. Repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`.
-- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged and counted.
+- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged.
 - Mapping real vendor payloads (event names, batching, signatures) is production work inside each provider adapter.
 
 ### Errors
@@ -443,7 +443,7 @@ sequenceDiagram
     else delivery already final
         H->>D: audit CALLBACK_IGNORED
     else unknown deliveryId
-        H->>H: log + metric
+        H->>H: log
     end
     H-->>V: 200
 ```
@@ -475,7 +475,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
-- Warnings for unknown-delivery or rejected webhook calls: misconfiguration or forged callbacks.
+- Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
 
 ## Scaling path (not built)
 
