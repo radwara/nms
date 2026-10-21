@@ -5,9 +5,11 @@ import com.example.nms.intake.SubmitCommand;
 import com.example.nms.intake.SubmitResult;
 import com.example.nms.intake.TimeViolation;
 import com.example.nms.security.SourceSystem;
+import jakarta.servlet.http.HttpServletResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -19,12 +21,16 @@ import tools.jackson.databind.JsonNode;
 
 /**
  * Submit endpoint. Translates intake outcomes to HTTP: 202 new, 200 replay, 409 / 4091 key reused
- * with a different payload, 422 / 4221, 4222, 4223 time rules and unknown recipients together (new
- * submissions only). Rejections are audited by {@link SubmitRejectionAudit}.
+ * with a different payload, 409 / 4092 key still in progress (with {@code Retry-After}), 422 /
+ * 4221, 4222, 4223 time rules and unknown recipients together (new submissions only). Rejections
+ * are audited by {@link SubmitRejectionAudit}.
  */
 @RestController
 @RequestMapping("/api/v1/notifications")
 class NotificationController {
+
+  /** Seconds a client should wait before retrying a key that is still in progress. */
+  static final String RETRY_IN_PROGRESS_SECONDS = "1";
 
   private final SubmitRequestValidator validator;
   private final IntakeService intake;
@@ -40,7 +46,8 @@ class NotificationController {
       SourceSystem source,
       @RequestHeader(name = SubmitRequestValidator.IDEMPOTENCY_KEY, required = false)
           String idempotencyKey,
-      @RequestBody JsonNode body) {
+      @RequestBody JsonNode body,
+      HttpServletResponse response) {
     SubmitCommand command = validator.validate(source, idempotencyKey, body);
     return switch (intake.submit(command)) {
       case SubmitResult.Created created ->
@@ -52,6 +59,12 @@ class NotificationController {
           throw new ApiException(
               ApiError.of(
                   ErrorCode.IDEMPOTENCY_KEY_REUSED, SubmitRequestValidator.IDEMPOTENCY_KEY));
+      case SubmitResult.InProgress inProgress -> {
+        response.setHeader(HttpHeaders.RETRY_AFTER, RETRY_IN_PROGRESS_SECONDS);
+        throw new ApiException(
+            ApiError.of(
+                ErrorCode.IDEMPOTENCY_KEY_IN_PROGRESS, SubmitRequestValidator.IDEMPOTENCY_KEY));
+      }
       case SubmitResult.Unprocessable unprocessable ->
           throw new ApiException(unprocessable(command, unprocessable));
     };

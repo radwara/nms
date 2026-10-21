@@ -22,6 +22,8 @@ public enum ErrorCode {
   NOT_ACCEPTABLE(4060, HttpStatus.NOT_ACCEPTABLE, "Not acceptable"),
   IDEMPOTENCY_KEY_REUSED(
       4091, HttpStatus.CONFLICT, "Idempotency key reused with a different payload"),
+  IDEMPOTENCY_KEY_IN_PROGRESS(
+      4092, HttpStatus.CONFLICT, "Request with this Idempotency-Key is still in progress"),
   UNSUPPORTED_MEDIA_TYPE(4151, HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported content type"),
   EXPIRES_AT_IN_PAST(4221, HttpStatus.UNPROCESSABLE_CONTENT, "expiresAt is in the past"),
   SCHEDULED_AFTER_EXPIRY(4222, HttpStatus.UNPROCESSABLE_CONTENT, "scheduledAt is after expiresAt"),

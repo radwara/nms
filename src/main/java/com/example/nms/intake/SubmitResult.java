@@ -25,6 +25,12 @@ public sealed interface SubmitResult {
   record KeyConflict() implements SubmitResult {}
 
   /**
+   * Another request with this key is still inside its transaction and outlasted the lock wait and
+   * the replay retries. Nothing written; the caller should retry shortly.
+   */
+  record InProgress() implements SubmitResult {}
+
+  /**
    * A new submission that is well-formed but cannot be accepted: time rules broken and recipients
    * not in the directory (request order), reported together. Nothing written.
    */

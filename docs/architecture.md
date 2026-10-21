@@ -175,6 +175,7 @@ Every error, including authentication failures raised before any controller, use
 | 4050 | 405 | Method not allowed (`Allow` header set) |
 | 4060 | 406 | Not acceptable (`Accept` cannot be satisfied) |
 | 4091 | 409 | Idempotency key reused with a different payload |
+| 4092 | 409 | Request with this Idempotency-Key is still in progress: another request holds the key past the lock wait and short replay retries. `Retry-After: 1` |
 | 4151 | 415 | Unsupported content type |
 | 4221 | 422 | `expiresAt` is in the past |
 | 4222 | 422 | `scheduledAt` is after `expiresAt` |

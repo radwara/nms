@@ -3,6 +3,7 @@ package com.example.nms.intake;
 import com.example.nms.audit.AuditRecorder;
 import com.example.nms.directory.RecipientRepository;
 import com.example.nms.intake.SubmitResult.Created;
+import com.example.nms.intake.SubmitResult.InProgress;
 import com.example.nms.intake.SubmitResult.KeyConflict;
 import com.example.nms.intake.SubmitResult.Replayed;
 import com.example.nms.intake.SubmitResult.Unprocessable;
@@ -20,6 +21,7 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -36,6 +38,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class IntakeService {
 
   private static final Logger log = LoggerFactory.getLogger(IntakeService.class);
+  private static final int LOCK_RETRIES = 3;
+  private static final Duration LOCK_RETRY_BACKOFF = Duration.ofMillis(100);
 
   private final IdempotencyRecordRepository records;
   private final NotificationRepository notifications;
@@ -77,6 +81,37 @@ public class IntakeService {
       }
       log.info("Concurrent submission with the same key resolved as {}", describe(result));
       return result;
+    } catch (PessimisticLockingFailureException e) {
+      // The lock wait timed out: the other request still holds the key. Its record becomes
+      // visible when it commits, so look again briefly before giving up.
+      return replayWhenCommitted(command, requestHash);
+    }
+  }
+
+  private SubmitResult replayWhenCommitted(SubmitCommand command, String requestHash) {
+    for (int attempt = 1; attempt <= LOCK_RETRIES; attempt++) {
+      if (!pause(LOCK_RETRY_BACKOFF.multipliedBy(attempt))) {
+        break;
+      }
+      SubmitResult result = transaction.execute(status -> replayLiveRecord(command, requestHash));
+      if (result != null) {
+        log.info("Locked key resolved as {} after {} retries", describe(result), attempt);
+        return result;
+      }
+    }
+    log.info(
+        "Key still locked by a concurrent request for source system {}", command.sourceSystem());
+    return new InProgress();
+  }
+
+  /** {@code false} if interrupted. */
+  private static boolean pause(Duration duration) {
+    try {
+      Thread.sleep(duration);
+      return true;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
     }
   }
 
