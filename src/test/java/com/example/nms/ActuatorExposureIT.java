@@ -36,14 +36,31 @@ class ActuatorExposureIT {
   }
 
   @Test
-  void otherActuatorEndpointsAreNotExposed() throws Exception {
-    assertThat(get("/actuator/env").statusCode()).isEqualTo(404);
-    assertThat(get("/actuator/beans").statusCode()).isEqualTo(404);
+  void infoIsExposed() throws Exception {
+    assertThat(get("/actuator/info").statusCode()).isEqualTo(200);
+  }
+
+  @Test
+  void onlyHealthInfoAndPrometheusAreExposed() throws Exception {
+    String links = get("/actuator").body();
+
+    assertThat(linkNames(links))
+        .containsExactlyInAnyOrder("self", "health", "health-path", "info", "prometheus");
   }
 
   @Test
   void h2ConsoleIsOffByDefault() throws Exception {
     assertThat(get("/h2-console/").statusCode()).isEqualTo(404);
+  }
+
+  private static java.util.Set<String> linkNames(String json) {
+    java.util.Set<String> names = new java.util.HashSet<>();
+    java.util.regex.Matcher m =
+        java.util.regex.Pattern.compile("\"([a-z-]+)\":\\{\"href\"").matcher(json);
+    while (m.find()) {
+      names.add(m.group(1));
+    }
+    return names;
   }
 
   private HttpResponse<String> get(String path) throws Exception {

@@ -1,0 +1,4 @@
+# Each test context gets its own in-memory database with the same H2 options as production.
+spring:
+  datasource:
+    url: jdbc:h2:mem:${random.uuid};MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DEFAULT_NULL_ORDERING=HIGH;DB_CLOSE_DELAY=-1
