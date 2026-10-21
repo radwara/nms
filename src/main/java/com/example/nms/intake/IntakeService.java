@@ -159,11 +159,11 @@ public class IntakeService {
     if (!record.getRequestHash().equals(command.requestHash())) {
       return new KeyConflict();
     }
-    Map<String, Notification> byRecipient =
-        notifications.findBySubmissionId(record.getSubmissionId()).stream()
-            .collect(Collectors.toMap(Notification::getRecipientId, Function.identity()));
+    Map<String, SubmittedNotification> byRecipient =
+        notifications.findIdsBySubmissionId(record.getSubmissionId()).stream()
+            .collect(Collectors.toMap(SubmittedNotification::recipientId, Function.identity()));
     // Same hash means same recipients in the same order, so the request gives the order back.
-    List<Notification> ordered =
+    List<SubmittedNotification> ordered =
         command.recipients().stream()
             .map(recipient -> byRecipient.get(recipient.userId()))
             .toList();
@@ -171,12 +171,14 @@ public class IntakeService {
       throw new IllegalStateException(
           "Submission " + record.getSubmissionId() + " is missing a recipient's notification");
     }
-    ordered.forEach(n -> audit.duplicateSubmission(command.sourceSystem(), n.getId(), now));
+    // One event per notification: each notification's history and duplicate count show it.
+    ordered.forEach(
+        n -> audit.duplicateSubmission(command.sourceSystem(), n.notificationId(), now));
     log.info(
         "Submission {} replayed for source system {}",
         record.getSubmissionId(),
         command.sourceSystem());
-    return new Replayed(view(ordered));
+    return new Replayed(ordered);
   }
 
   private List<String> unknownRecipients(SubmitCommand command) {
