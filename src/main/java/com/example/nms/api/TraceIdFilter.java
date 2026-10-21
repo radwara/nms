@@ -1,15 +1,13 @@
 package com.example.nms.api;
 
+import com.example.nms.observability.TraceIds;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.HexFormat;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import org.slf4j.MDC;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
@@ -17,15 +15,16 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
  * First filter on every request: takes the trace id from a valid W3C {@code traceparent} or
- * generates one, puts it in the MDC, and returns it in {@code X-Trace-Id}.
+ * generates one, binds it to the MDC, and returns it in {@code X-Trace-Id}. Also runs on the error
+ * dispatch, reusing the request's id, so {@code /error} responses and logs carry the same id.
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 public class TraceIdFilter extends OncePerRequestFilter {
 
-  public static final String MDC_KEY = "traceId";
   public static final String RESPONSE_HEADER = "X-Trace-Id";
   static final String TRACEPARENT_HEADER = "traceparent";
+  private static final String REQUEST_ATTRIBUTE = TraceIdFilter.class.getName() + ".traceId";
 
   // version-traceid-parentid-flags; future versions may append fields (W3C Trace Context).
   private static final Pattern TRACEPARENT =
@@ -34,16 +33,25 @@ public class TraceIdFilter extends OncePerRequestFilter {
   private static final String ZERO_PARENT_ID = "0".repeat(16);
 
   @Override
+  protected boolean shouldNotFilterErrorDispatch() {
+    return false;
+  }
+
+  @Override
   protected void doFilterInternal(
       HttpServletRequest request, HttpServletResponse response, FilterChain chain)
       throws ServletException, IOException {
-    String traceId = resolve(request.getHeader(TRACEPARENT_HEADER));
-    MDC.put(MDC_KEY, traceId);
+    String traceId =
+        request.getAttribute(REQUEST_ATTRIBUTE) instanceof String existing
+            ? existing
+            : resolve(request.getHeader(TRACEPARENT_HEADER));
+    request.setAttribute(REQUEST_ATTRIBUTE, traceId);
     response.setHeader(RESPONSE_HEADER, traceId);
+    TraceIds.Scope scope = TraceIds.open(traceId);
     try {
       chain.doFilter(request, response);
     } finally {
-      MDC.remove(MDC_KEY);
+      scope.close();
     }
   }
 
@@ -59,12 +67,6 @@ public class TraceIdFilter extends OncePerRequestFilter {
         return m.group(2);
       }
     }
-    return generate();
-  }
-
-  private static String generate() {
-    byte[] bytes = new byte[16];
-    ThreadLocalRandom.current().nextBytes(bytes);
-    return HexFormat.of().formatHex(bytes);
+    return TraceIds.newId();
   }
 }

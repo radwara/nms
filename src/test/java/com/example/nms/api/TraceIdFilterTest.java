@@ -2,6 +2,7 @@ package com.example.nms.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.nms.observability.TraceIds;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -57,10 +58,10 @@ class TraceIdFilterTest {
     AtomicReference<String> mdcInChain = new AtomicReference<>();
 
     new TraceIdFilter()
-        .doFilter(request, response, (req, res) -> mdcInChain.set(MDC.get(TraceIdFilter.MDC_KEY)));
+        .doFilter(request, response, (req, res) -> mdcInChain.set(MDC.get(TraceIds.MDC_KEY)));
 
     assertThat(mdcInChain.get()).isEqualTo(TRACE_ID);
     assertThat(response.getHeader(TraceIdFilter.RESPONSE_HEADER)).isEqualTo(TRACE_ID);
-    assertThat(MDC.get(TraceIdFilter.MDC_KEY)).isNull();
+    assertThat(MDC.get(TraceIds.MDC_KEY)).isNull();
   }
 }
