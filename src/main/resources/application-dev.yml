@@ -9,3 +9,8 @@ logging:
       console: ""
   pattern:
     correlation: "[%X{traceId:-}] "
+
+# Demo keys only (plaintext in ADR-0001). NMS_API_KEYS still overrides them.
+nms:
+  security:
+    api-keys: ${NMS_API_KEYS:demo1:demo-app:4530bfad54b2432bdec5406b7f9f668987e2697b931ed715f965f6c02aec995b,demo2:demo-app:3a83b1837de2e6b4cda334d357681460a2289f1fae9702354878758b2a79e807,other1:other-app:71da12377d22bca88514fa361590393bced31ac0b2a780f9056ea71f0ff67449}

@@ -31,3 +31,8 @@ logging:
   structured:
     format:
       console: ecs
+
+nms:
+  security:
+    # keyId:sourceSystem:sha256hex[,...] (ADR-0001). Empty: every /api request is rejected with 401.
+    api-keys: ${NMS_API_KEYS:}
