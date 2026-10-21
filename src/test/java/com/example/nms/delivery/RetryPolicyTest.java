@@ -123,4 +123,43 @@ class RetryPolicyTest {
     assertThat(policy.after(1, TRANSIENT, NOW, NOW.plusSeconds(2).plusNanos(1_000)))
         .isInstanceOf(Next.Retry.class);
   }
+
+  @Test
+  void exhaustedOnceMaxAttemptsHaveStarted() {
+    assertThat(policy.exhausted(3)).isFalse();
+    assertThat(policy.exhausted(4)).isTrue();
+    assertThat(policy.exhausted(5)).isTrue();
+  }
+
+  @Test
+  void retryAfterLongerThanAnHourIsClamped() {
+    Failed limited = new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofDays(3)));
+
+    assertThat(policy.after(1, limited, NOW, null))
+        .isEqualTo(new Next.Retry(NOW.plus(Duration.ofHours(1)), Duration.ofHours(1)));
+  }
+
+  @Test
+  void negativeRetryAfterIsClampedToZero() {
+    Failed limited =
+        new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofSeconds(-5)));
+
+    assertThat(policy.after(1, limited, NOW, null)).isEqualTo(new Next.Retry(NOW, Duration.ZERO));
+  }
+
+  @Test
+  void clampedRetryAfterStillExpiresAtExpiresAt() {
+    Failed limited = new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofDays(3)));
+
+    assertThat(policy.after(1, limited, NOW, NOW.plus(Duration.ofMinutes(30))))
+        .isEqualTo(new Next.Expire());
+  }
+
+  @Test
+  void postponementIsTheNextBackoffBoundAndAtLeastASecond() {
+    assertThat(policy.postponement(0)).isEqualTo(Duration.ofSeconds(2));
+    assertThat(policy.postponement(2)).isEqualTo(Duration.ofSeconds(8));
+    assertThat(new RetryPolicy(4, Duration.ZERO, max -> max).postponement(0))
+        .isEqualTo(Duration.ofSeconds(1));
+  }
 }
