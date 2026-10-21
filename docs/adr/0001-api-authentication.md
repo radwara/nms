@@ -22,15 +22,40 @@ Callers are other systems (machine-to-machine). The spec does not define authent
 **B for the prototype. C or D in production.**
 
 - Key format `nms_<keyId>_<secret>`; secret is 32 random bytes, base64url.
-- Stored per key: `keyId`, `sourceSystem`, `SHA-256(secret)`. Supplied via config / environment for the prototype.
+- Stored per key: `keyId`, `sourceSystem`, SHA-256 of the full key string. Supplied via config / environment for the prototype.
 - Lookup by `keyId`, compare hashes in constant time (`MessageDigest.isEqual`).
 - Multiple active keys per source allow rotation with overlap: add the new hash, migrate callers, remove the old hash. Keys are generated with `openssl rand` and hashed once; the plaintext is never stored. No expiry, revocation, or issuance tooling in the prototype.
 - `sourceSystem` comes from the authenticated key, never from the request body.
 - Reads are tenant-scoped: a source can only read its own notifications; others get 404.
 - Implemented as a plain request filter that writes the standard error body (not Spring Security), to keep 401s in the same format with minimal code.
-- Failures return a generic 401. Logs carry `keyId` only, never the secret. Auth failures are counted in metrics.
+- Missing key: 401 / 4011. Malformed key, unknown `keyId`, or wrong secret: 401 / 4012 with an identical body. Logs carry `keyId` only (for configured keyIds), never the key or its hash.
 
 SHA-256 rather than bcrypt/argon2: keys are 256-bit random values, not low-entropy passwords, so a slow hash adds per-request latency without adding security.
+
+## Configuration
+
+`NMS_API_KEYS` (property `nms.security.api-keys`): `keyId:sourceSystem:sha256hex[,...]`, where `sha256hex` is the lowercase hex SHA-256 of the full key. Entries may share a `sourceSystem` (rotation). Empty: every `/api` call gets 401. A malformed entry fails startup.
+
+Scope: `/api/**` except `/api/v1/webhooks/**` (own token, #11). `/actuator/**` is outside.
+
+Generate a key and its config entry:
+
+```sh
+KEY_ID=billing1   # [A-Za-z0-9], no underscore
+KEY="nms_${KEY_ID}_$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+echo "$KEY"       # hand to the caller once; never stored
+printf '%s' "$KEY" | openssl dgst -sha256 -r | cut -d' ' -f1   # entry: billing1:<sourceSystem>:<this hash>
+```
+
+### Demo keys (dev profile and tests only)
+
+Not secrets and deliberately not random. Hashes live in `application-dev.yml` and `src/test/resources/config/application.yml`; never configure them elsewhere.
+
+| Key | keyId | sourceSystem |
+|---|---|---|
+| `nms_demo1_dev-only` | `demo1` | `demo-app` |
+| `nms_demo2_dev-only` | `demo2` | `demo-app` (second key, rotation) |
+| `nms_other1_dev-only` | `other1` | `other-app` |
 
 ## Production path
 
