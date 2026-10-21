@@ -6,7 +6,6 @@ import com.example.nms.common.Severity;
 import com.example.nms.intake.RequestHash;
 import com.example.nms.intake.SubmitCommand;
 import com.example.nms.security.SourceSystem;
-import java.time.Clock;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -23,8 +22,10 @@ import tools.jackson.databind.JsonNode;
 /**
  * Validates a submit request (architecture.md, Submit and Errors) and turns it into a {@link
  * SubmitCommand}. The body is bound as a tree, so every field error is collected and thrown once;
- * 400-class errors win over 422-class ones ({@link ApiErrors}). Messages never contain submitted
- * values. Unknown properties, including {@code sourceSystem}, are ignored.
+ * checks here are 400-class only. Time rules (4221, 4222) and recipient existence (4223) are
+ * checked by intake after the idempotency lookup, so a retry of an accepted request still replays.
+ * Messages never contain submitted values. Unknown properties, including {@code sourceSystem}, are
+ * ignored.
  */
 @Component
 class SubmitRequestValidator {
@@ -41,12 +42,6 @@ class SubmitRequestValidator {
   // Timestamps outside years 1..9999 are rejected: not every database can store them.
   private static final Instant EARLIEST = Instant.parse("0001-01-01T00:00:00Z");
   private static final Instant LATEST = Instant.parse("9999-12-31T23:59:59.999999Z");
-
-  private final Clock clock;
-
-  SubmitRequestValidator(Clock clock) {
-    this.clock = clock;
-  }
 
   /** The command for a valid request; otherwise throws {@link ApiException} with every error. */
   SubmitCommand validate(SourceSystem source, String idempotencyKey, JsonNode body) {
@@ -67,13 +62,6 @@ class SubmitRequestValidator {
     Instant scheduledAt = optionalInstant(body, "scheduledAt", errors);
     Instant expiresAt = optionalInstant(body, "expiresAt", errors);
 
-    // 422-class: well-formed but unacceptable. A past scheduledAt is sent now (A-16).
-    if (expiresAt != null && !expiresAt.isAfter(clock.instant())) {
-      errors.add(ErrorCode.EXPIRES_AT_IN_PAST, "expiresAt");
-    }
-    if (scheduledAt != null && expiresAt != null && scheduledAt.isAfter(expiresAt)) {
-      errors.add(ErrorCode.SCHEDULED_AFTER_EXPIRY, "scheduledAt");
-    }
     errors.throwIfAny();
 
     return new SubmitCommand(

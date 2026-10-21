@@ -3,6 +3,7 @@ package com.example.nms.intake;
 import com.example.nms.audit.AuditRecorder;
 import com.example.nms.directory.RecipientRepository;
 import com.example.nms.intake.SubmitResult.Created;
+import com.example.nms.intake.SubmitResult.InvalidTimes;
 import com.example.nms.intake.SubmitResult.KeyConflict;
 import com.example.nms.intake.SubmitResult.Replayed;
 import com.example.nms.intake.SubmitResult.UnknownRecipients;
@@ -86,6 +87,11 @@ public class IntakeService {
             command.sourceSystem(), command.idempotencyKey());
     if (existing.isPresent() && existing.get().isLiveAt(now)) {
       return replayOrConflict(existing.get(), command, now);
+    }
+    // The rules below apply to new submissions only; a replay was answered above.
+    List<TimeViolation> violations = TimeViolation.of(command, now);
+    if (!violations.isEmpty()) {
+      return new InvalidTimes(violations);
     }
     List<String> unknown = unknownRecipients(command);
     if (!unknown.isEmpty()) {

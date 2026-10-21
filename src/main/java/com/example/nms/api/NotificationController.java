@@ -18,8 +18,8 @@ import tools.jackson.databind.JsonNode;
 
 /**
  * Submit endpoint. Translates intake outcomes to HTTP: 202 new, 200 replay, 409 / 4091 key reused
- * with a different payload, 422 / 4223 unknown recipients. Rejections are audited by {@link
- * SubmitRejectionAudit}.
+ * with a different payload, 422 / 4221, 4222 time rules and 4223 unknown recipients (new
+ * submissions only). Rejections are audited by {@link SubmitRejectionAudit}.
  */
 @RestController
 @RequestMapping("/api/v1/notifications")
@@ -51,9 +51,22 @@ class NotificationController {
           throw new ApiException(
               ApiError.of(
                   ErrorCode.IDEMPOTENCY_KEY_REUSED, SubmitRequestValidator.IDEMPOTENCY_KEY));
+      case SubmitResult.InvalidTimes invalid -> throw new ApiException(timeErrors(invalid));
       case SubmitResult.UnknownRecipients unknown ->
           throw new ApiException(unknownRecipients(command, unknown));
     };
+  }
+
+  private static List<ApiError> timeErrors(SubmitResult.InvalidTimes invalid) {
+    return invalid.violations().stream()
+        .map(
+            violation ->
+                switch (violation) {
+                  case EXPIRES_AT_IN_PAST -> ApiError.of(ErrorCode.EXPIRES_AT_IN_PAST, "expiresAt");
+                  case SCHEDULED_AFTER_EXPIRY ->
+                      ApiError.of(ErrorCode.SCHEDULED_AFTER_EXPIRY, "scheduledAt");
+                })
+        .toList();
   }
 
   /** One error per unknown recipient, by position: the ids themselves are not echoed. */

@@ -24,6 +24,14 @@ public sealed interface SubmitResult {
   /** The key belongs to an accepted submission with a different payload. Nothing written. */
   record KeyConflict() implements SubmitResult {}
 
+  /** A new submission breaks a time rule, e.g. {@code expiresAt} has passed. Nothing written. */
+  record InvalidTimes(List<TimeViolation> violations) implements SubmitResult {
+
+    public InvalidTimes {
+      violations = List.copyOf(violations);
+    }
+  }
+
   /** Recipients not in the directory, in request order. Nothing written. */
   record UnknownRecipients(List<String> recipientIds) implements SubmitResult {
 

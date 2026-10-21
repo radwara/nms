@@ -9,9 +9,7 @@ import com.example.nms.common.Severity;
 import com.example.nms.intake.RequestHash;
 import com.example.nms.intake.SubmitCommand;
 import com.example.nms.security.SourceSystem;
-import java.time.Clock;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -24,11 +22,9 @@ import tools.jackson.databind.node.ObjectNode;
 /** #8: submit validation rules not worth a full context each. */
 class SubmitRequestValidatorTest {
 
-  private static final Instant NOW = Instant.parse("2026-10-21T10:00:00Z");
   private static final SourceSystem SOURCE = new SourceSystem("demo-app");
 
-  private final SubmitRequestValidator validator =
-      new SubmitRequestValidator(Clock.fixed(NOW, ZoneOffset.UTC));
+  private final SubmitRequestValidator validator = new SubmitRequestValidator();
 
   @Test
   void validRequestBecomesACommandWithTheSourceSystemFromTheKey() {
@@ -155,28 +151,15 @@ class SubmitRequestValidatorTest {
   }
 
   @Test
-  void expiresAtEqualToNowIsInThePast() {
+  void timeRulesAreLeftToIntakeSoAnAcceptedRequestCanStillReplay() {
     ObjectNode body = valid();
-    body.put("expiresAt", NOW.toString());
+    body.put("expiresAt", "2020-01-01T00:00:00Z");
+    body.put("scheduledAt", "2020-01-01T00:00:01Z");
 
-    assertThat(errors(body)).containsExactly("4221 expiresAt");
-  }
+    SubmitCommand command = validator.validate(SOURCE, "k", body);
 
-  @Test
-  void scheduledAtEqualToExpiresAtIsAccepted() {
-    ObjectNode body = valid();
-    body.put("scheduledAt", body.get("expiresAt").stringValue());
-
-    assertThat(validator.validate(SOURCE, "k", body).scheduledAt()).isNotNull();
-  }
-
-  @Test
-  void bothSemanticErrorsAreReportedTogether() {
-    ObjectNode body = valid();
-    body.put("expiresAt", "2026-10-20T00:00:00Z");
-    body.put("scheduledAt", "2026-10-20T00:00:01Z");
-
-    assertThat(errors(body)).containsExactly("4221 expiresAt", "4222 scheduledAt");
+    assertThat(command.expiresAt()).isEqualTo(Instant.parse("2020-01-01T00:00:00Z"));
+    assertThat(command.scheduledAt()).isEqualTo(Instant.parse("2020-01-01T00:00:01Z"));
   }
 
   @Test
