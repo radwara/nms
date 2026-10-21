@@ -22,6 +22,31 @@ issue (acceptance criteria) -> branch -> tests from criteria -> AI implements
   -> PR (with AI-usage note) -> CI green -> merge
 ```
 
+## Independent review checkpoints
+
+A fresh-context reviewer (separate AI session with no access to the implementing conversation) critiques the work at each logical point. Findings and the engineer's disposition (accepted / rejected / deferred, with reason) are posted on the PR.
+
+| Checkpoint | Reviewer focus |
+|---|---|
+| Design freeze | Over-complication, spec gaps, correctness risks, scope vs budget |
+| Every PR | Bugs and edge cases against the issue's acceptance criteria |
+| Greenfield tag | Code vs `architecture.md` drift; spec coverage; scope remaining |
+| Brownfield impact analysis | Missed layers, regression risk, test plan, before any code |
+| Ambiguous-scenario options | Are options and questions real; is the decision defensible |
+| Before submission | Acts as the grader: runs the demo from the README, checks every requirement |
+
+## Checks
+
+| Layer | Check |
+|---|---|
+| Before code | Acceptance criteria approved; tests written from them |
+| Local | `./mvnw verify`; git hooks block private files and non-conforming commit messages |
+| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build, demo script smoke run |
+| Dependencies | Dependabot for Maven and GitHub Actions |
+| Review | Independent reviewer + engineer review on every PR |
+| Traceability | `requirements.md` Test column filled per merged requirement |
+| Scope | Hours logged per milestone against the budget; cut list from the design review applied when behind |
+
 ## Definition of done
 
 - Acceptance criteria covered by tests the engineer has read
