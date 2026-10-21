@@ -2,6 +2,7 @@ package com.example.nms.support;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import tools.jackson.databind.json.JsonMapper;
@@ -30,7 +31,9 @@ public final class SubmitRequests {
     body.put("subject", "Suspicious login");
     body.put("body", "We noticed a login from a new device.");
     body.putNull("scheduledAt");
-    body.put("expiresAt", Instant.now().plus(Duration.ofDays(1)).toString());
+    // Microseconds, as stored: Linux clocks have nanoseconds, which the server truncates.
+    Instant expiresAt = Instant.now().truncatedTo(ChronoUnit.MICROS).plus(Duration.ofDays(1));
+    body.put("expiresAt", expiresAt.toString());
     return body;
   }
 
