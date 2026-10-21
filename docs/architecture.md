@@ -249,7 +249,7 @@ Seeded recipients:
 | `source_system`, `idempotency_key` | varchar(64), varchar(128) | Unique together. Longer keys rejected (4003) |
 | `request_hash` | char(64) | SHA-256 of the canonical parsed request (not raw bytes, so whitespace and key order do not cause false conflicts) |
 | `submission_id` | uuid | Links to the notifications created |
-| `created_at`, `expires_at` | timestamp | Lookups ignore expired rows; `expires_at` indexed for the purge job (7 days) |
+| `created_at`, `expires_at` | timestamp | Kept 7 days. Lookups ignore expired rows; an expired row is replaced in the same transaction via a conditional update. No purge job; purge is the production path |
 
 `notification`: one per recipient.
 
@@ -475,7 +475,7 @@ What to alert on:
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429 | Token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
-| Retention | Idempotency purge job | Partitioned audit tables, archival |
+| Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
 
 ## Out of scope
 

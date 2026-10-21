@@ -28,8 +28,6 @@ create table idempotency_record (
     constraint uk_idempotency_record_source_key unique (source_system, idempotency_key)
 );
 
-create index ix_idempotency_record_expires_at on idempotency_record (expires_at);
-
 create table notification (
     id                 uuid                     not null,
     submission_id      uuid                     not null,

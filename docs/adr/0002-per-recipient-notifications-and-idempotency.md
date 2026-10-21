@@ -24,7 +24,7 @@ Spec 4.1 requires a request to accept one or more recipients. Spec 4.4 requires 
 - Same key, same hash: `200` with the original notification ids, `DUPLICATE_SUBMISSION` audited on each. Same key, different hash: `409 / 4091`.
 - The idempotency record and all notifications are written in one transaction.
 - Any unknown recipient rejects the whole request (`422 / 4223`). One key maps to at most one accepted submission; rejections are not stored, so a corrected retry with the same key can succeed.
-- Keys are honored for 7 days (configurable); lookups ignore expired records, and a daily job purges them.
+- Keys are honored for 7 days (configurable); lookups ignore expired records; an expired record is replaced in the same transaction via a conditional update; no purge job, purge is the production path.
 - `submissionId` is internal: used for replay and audit grouping, not returned.
 
 ## Discussion
