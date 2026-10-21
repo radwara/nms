@@ -67,6 +67,40 @@ class ErrorContractIT {
   }
 
   @Test
+  void unknownRouteIs4040WithoutEchoingThePath() {
+    MvcTestResult result =
+        mvc.get().uri("/api/v1/test/no-such-route-xyz").header(HEADER, DEMO1).exchange();
+
+    assertSingleError(result, 404, 4040, null);
+    assertThat(result).bodyText().doesNotContain("no-such-route-xyz");
+  }
+
+  @Test
+  void unknownRouteOutsideTheApiIs4040() {
+    assertSingleError(mvc.get().uri("/no-such-page").exchange(), 404, 4040, null);
+  }
+
+  @Test
+  void wrongMethodIs4050WithAllowHeader() {
+    MvcTestResult result = mvc.get().uri(ECHO).header(HEADER, DEMO1).exchange();
+
+    assertSingleError(result, 405, 4050, null);
+    assertThat(result).hasHeader("Allow", "POST");
+  }
+
+  @Test
+  void unacceptableResponseTypeIs4060() {
+    MvcTestResult result =
+        mvc.get()
+            .uri("/api/v1/test/source")
+            .header(HEADER, DEMO1)
+            .accept(MediaType.APPLICATION_XML)
+            .exchange();
+
+    assertSingleError(result, 406, 4060, "Accept");
+  }
+
+  @Test
   void unexpectedExceptionIs5000WithNoDetailAndIsLoggedWithTraceId(CapturedOutput output) {
     MvcTestResult result =
         mvc.get().uri("/api/v1/test/unexpected").header(HEADER, DEMO1).exchange();

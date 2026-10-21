@@ -14,7 +14,10 @@ public enum ErrorCode {
   TOO_MANY_RECIPIENTS(4005, HttpStatus.BAD_REQUEST, "Too many recipients (max 100)"),
   CREDENTIALS_MISSING(4011, HttpStatus.UNAUTHORIZED, "Credentials are missing"),
   CREDENTIALS_INVALID(4012, HttpStatus.UNAUTHORIZED, "Credentials are invalid"),
+  RESOURCE_NOT_FOUND(4040, HttpStatus.NOT_FOUND, "Resource not found"),
   NOTIFICATION_NOT_FOUND(4041, HttpStatus.NOT_FOUND, "Notification not found"),
+  METHOD_NOT_ALLOWED(4050, HttpStatus.METHOD_NOT_ALLOWED, "Method not allowed"),
+  NOT_ACCEPTABLE(4060, HttpStatus.NOT_ACCEPTABLE, "Not acceptable"),
   IDEMPOTENCY_KEY_REUSED(
       4091, HttpStatus.CONFLICT, "Idempotency key reused with a different payload"),
   UNSUPPORTED_MEDIA_TYPE(4151, HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Unsupported content type"),
