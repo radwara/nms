@@ -6,15 +6,20 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.Id;
+import jakarta.persistence.PostLoad;
+import jakarta.persistence.PostPersist;
+import jakarta.persistence.Transient;
 import java.time.Instant;
 import java.util.UUID;
+import org.springframework.data.domain.Persistable;
 
 /**
  * One notification per recipient of a submission. Holds the content; overall status is derived from
- * its deliveries, so there is no status column.
+ * its deliveries, so there is no status column. Ids are assigned by the application, so {@link
+ * #isNew()} tells Spring Data to insert without a prior select.
  */
 @Entity
-public class Notification {
+public class Notification implements Persistable<UUID> {
 
   @Id private UUID id;
 
@@ -46,6 +51,8 @@ public class Notification {
   private Instant expiresAt;
 
   private Instant createdAt;
+
+  @Transient private boolean isNew = true;
 
   protected Notification() {}
 
@@ -80,6 +87,7 @@ public class Notification {
     this.createdAt = createdAt;
   }
 
+  @Override
   public UUID getId() {
     return id;
   }
@@ -134,5 +142,16 @@ public class Notification {
 
   public Instant getCreatedAt() {
     return createdAt;
+  }
+
+  @Override
+  public boolean isNew() {
+    return isNew;
+  }
+
+  @PostLoad
+  @PostPersist
+  void markNotNew() {
+    this.isNew = false;
   }
 }
