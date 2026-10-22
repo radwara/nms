@@ -40,6 +40,12 @@ nms:
   idempotency:
     # How long an accepted Idempotency-Key is honored (ADR-0002); afterwards it may create a new submission.
     retention: ${NMS_IDEMPOTENCY_RETENTION:7d}
+  dedup:
+    # Event dedup (ADR-0006): a repeat of the same event and message for a recipient under a new key,
+    # within the window, is suppressed. false = greenfield behaviour (no lookup, nothing suppressed).
+    enabled: ${NMS_DEDUP_ENABLED:true}
+    # Measured from the original's submission; must be positive. Independent of idempotency retention.
+    window: ${NMS_DEDUP_WINDOW:24h}
   routing:
     # Channels added per severity (A-26). An opt-out or a missing address withholds them (A-30).
     severity-escalation:

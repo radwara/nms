@@ -82,6 +82,24 @@ class SubmitStatementsIT {
     assertThat(statistics.getPrepareStatementCount()).isLessThanOrEqualTo(10);
   }
 
+  /** #14: event dedup is one lookup per submission, not one per recipient. */
+  @Test
+  void dedupIsOneLookupForAllRecipients() {
+    intake.submit(IntakeServiceIT.command(RECIPIENTS));
+    assertThat(executions("n.contentHash")).isEqualTo(1);
+    statistics.clear();
+
+    SubmitResult result = intake.submit(IntakeServiceIT.command(RECIPIENTS)); // new key
+
+    assertThat(((SubmitResult.Created) result).notifications())
+        .extracting(SubmittedNotification::outcome)
+        .containsOnly(SubmittedNotification.Outcome.SUPPRESSED);
+    assertThat(executions("n.contentHash")).isEqualTo(1);
+    assertThat(statistics.getEntityLoadCount()).isZero();
+    assertThat(statistics.getEntityStatistics(Delivery.class.getName()).getInsertCount()).isZero();
+    assertThat(statistics.getPrepareStatementCount()).isLessThanOrEqualTo(25);
+  }
+
   /** Executions of the queries whose HQL contains {@code fragment}. */
   private long executions(String fragment) {
     return Arrays.stream(statistics.getQueries())
