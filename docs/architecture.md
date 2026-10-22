@@ -116,7 +116,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
     { "at": "...", "type": "ACCEPTED" },
     { "at": "...", "type": "ROUTED", "channel": "SMS", "detail": "added: severity CRITICAL" },
     { "at": "...", "type": "ATTEMPT_FAILED", "channel": "EMAIL", "detail": "attempt 1, TRANSIENT, code 503" },
-    { "at": "...", "type": "RETRY_SCHEDULED", "channel": "EMAIL", "detail": "in 2s" },
+    { "at": "...", "type": "RETRY_SCHEDULED", "channel": "EMAIL", "detail": "in 0.4s" },
     { "at": "...", "type": "DUPLICATE_SUBMISSION", "detail": "same Idempotency-Key; original returned" },
     { "at": "...", "type": "DELIVERED", "channel": "EMAIL" }
   ]
@@ -378,7 +378,9 @@ stateDiagram-v2
 | `INVALID_RECIPIENT` | Bad address or number | `FAILED` |
 | `AUTH_ERROR` | Vendor rejects our credentials | `FAILED`, error log, metric (config problem, not delivery problem) |
 
-Retries: max 4 attempts (configurable), exponential backoff with full jitter (`random(0, base * 2^(attempt-1))`, base 2s). `RATE_LIMITED` waits `Retry-After` when the vendor sends it (clamped to 0..1h) and counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`; checked before every claim too, so a reclaimed row whose attempts are used up fails without a send. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
+Retries: max 3 attempts (configurable), exponential backoff with equal jitter: `cap/2 + random(0, cap/2)`, `cap = base * 2^(attempt-1)`, base 500ms, so waits always grow (250-500ms, then 500ms-1s). `RATE_LIMITED` waits `Retry-After` when the vendor sends it (clamped to 0..60s) and counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`; checked before every claim too, so a reclaimed row whose attempts are used up fails without a send. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
+
+`expiresAt` is optional (spec 4.1) and the only overall deadline; there is no default TTL. Without it, the attempt budget and the `Retry-After` cap bound a delivery: at most 3 sends of up to 10s (`send-timeout`) and 2 waits of up to 60s, about 2.5 minutes worst case (a crash mid-send adds a lease, 30s, per reclaim). Delivery is asynchronous: the submit call returns `202` before any send, so a client's request timeout never applies to retries.
 
 ### Overall status (derived on read)
 
@@ -474,7 +476,7 @@ sequenceDiagram
 - Each attempt runs under a fresh trace id, so its log lines (ids, channel, category, resulting state) can be grouped. Addresses and content are never logged.
 - `AUTH_ERROR` is also logged at ERROR: it means our credentials are wrong, not the recipient.
 
-Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 4s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`, or (`lease expired after expiresAt`) for a reclaimed one, which may have been sent.
+Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 0.8s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`, or (`lease expired after expiresAt`) for a reclaimed one, which may have been sent.
 
 Worker settings:
 
@@ -486,8 +488,8 @@ nms:
     batch-size: 20         # rows worked per poll
     lease: 30s             # SENDING older than this is reclaimed and resent; must exceed send-timeout
     send-timeout: 10s      # adapter contract: send returns within this (TIMEOUT otherwise)
-    max-attempts: 4        # including the first (A-40)
-    backoff-base: 2s       # retry n waits random(0, base * 2^(n-1)); RATE_LIMITED waits Retry-After if given
+    max-attempts: 3        # including the first (A-40)
+    backoff-base: 500ms    # retry n waits cap/2 + random(0, cap/2), cap = base * 2^(n-1); RATE_LIMITED waits Retry-After (max 60s)
 ```
 
 Startup fails if a provider in `nms.routing.providers` has no adapter bean, or one for another channel.
