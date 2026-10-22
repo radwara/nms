@@ -89,6 +89,33 @@ class ProviderCallbackIT {
   }
 
   @Test
+  void messageIdOfAnotherDeliveryIsNotCopiedAndTheOutcomeStillApplies() {
+    Delivery other = sent();
+    Notification n =
+        notifications.save(notification("user-ok", Priority.HIGH, clock.instant(), null));
+    Delivery sending = deliveries.save(delivery(n, Channel.EMAIL, clock.instant()));
+    deliveries.claim(sending.getId(), DeliveryStatus.PENDING, 0, clock.instant());
+    ObjectNode body = body(sending.getId(), "DELIVERED");
+    body.put("providerMessageId", other.getProviderMessageId());
+
+    assertThat(post(EMAIL_HOOK, SIM_EMAIL, body.toString())).hasStatusOk();
+
+    Delivery done = deliveries.findById(sending.getId()).orElseThrow();
+    assertThat(done.getStatus()).isEqualTo(DeliveryStatus.DELIVERED);
+    assertThat(done.getProviderMessageId()).isNull();
+    assertThat(
+            jdbc.queryForObject(
+                "select detail from audit_event where type = 'DELIVERED' and delivery_id = ?",
+                String.class,
+                sending.getId()))
+        .isEqualTo("message id conflict");
+    Delivery untouched = deliveries.findById(other.getId()).orElseThrow();
+    assertThat(untouched.getStatus()).isEqualTo(DeliveryStatus.SENT);
+    assertThat(untouched.getProviderMessageId()).isEqualTo(other.getProviderMessageId());
+    assertThat(untouched.getVersion()).isEqualTo(other.getVersion());
+  }
+
+  @Test
   void unknownDeliveryIdIs200() {
     MvcTestResult result =
         post(EMAIL_HOOK, SIM_EMAIL, body(UUID.randomUUID(), "DELIVERED").toString());

@@ -50,6 +50,10 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
   @Query("select d from Delivery d where d.id = :id")
   Optional<Delivery> findForUpdate(@Param("id") UUID id);
 
+  /** Whether another delivery of {@code provider} already has this vendor message id (unique). */
+  boolean existsByProviderAndProviderMessageIdAndIdNot(
+      String provider, String providerMessageId, UUID id);
+
   /** A notification's deliveries, one per channel. */
   List<Delivery> findByNotificationIdOrderByChannel(UUID notificationId);
 

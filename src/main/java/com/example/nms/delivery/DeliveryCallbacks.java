@@ -7,7 +7,9 @@ import com.example.nms.intake.Notification;
 import com.example.nms.intake.NotificationRepository;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import org.slf4j.Logger;
@@ -40,6 +42,9 @@ public class DeliveryCallbacks {
   static final String LATE_AFTER_EXPIRY = "late after expiry";
 
   static final String PROVIDER_MISMATCH = "provider mismatch";
+
+  /** Detail when the callback's message id belongs to another delivery: applied without it. */
+  static final String MESSAGE_ID_CONFLICT = "message id conflict";
 
   /** What a callback did. Every result is answered 200 so vendors do not retry. */
   public enum Result {
@@ -101,13 +106,19 @@ public class DeliveryCallbacks {
             ? DeliveryStatus.DELIVERED
             : DeliveryStatus.FAILED;
     String reason = reason(callback.event());
+    // provider_message_id is unique per provider; a vendor id already on another delivery is not
+    // copied (the outcome still applies), so a bad callback cannot fail with a constraint error.
+    boolean conflict =
+        delivery.getProviderMessageId() == null
+            && deliveries.existsByProviderAndProviderMessageIdAndIdNot(
+                callback.provider(), callback.providerMessageId(), delivery.getId());
     int updated =
         deliveries.applyCallback(
             delivery.getId(),
             callback.provider(),
             status,
             reason,
-            callback.providerMessageId(),
+            conflict ? null : callback.providerMessageId(),
             now);
     if (updated == 0) { // not expected while the row is locked; kept as the write's own guard
       DeliveryStatus current =
@@ -120,7 +131,7 @@ public class DeliveryCallbacks {
           notification.getId(),
           delivery.getId(),
           delivery.getChannel(),
-          detail(null, callback.reasonCode()),
+          detail(null, callback.reasonCode(), conflict),
           now);
     } else {
       audit.failed(
@@ -128,16 +139,17 @@ public class DeliveryCallbacks {
           notification.getId(),
           delivery.getId(),
           delivery.getChannel(),
-          detail(reason, callback.reasonCode()),
+          detail(reason, callback.reasonCode(), conflict),
           now);
     }
     afterCommit(() -> metrics.outcome(delivery.getChannel(), status));
     log.info(
-        "Delivery {} on {}: callback {} -> {}",
+        "Delivery {} on {}: callback {} -> {}{}",
         delivery.getId(),
         delivery.getChannel(),
         callback.event(),
-        status);
+        status,
+        conflict ? " (" + MESSAGE_ID_CONFLICT + ")" : "");
     return Result.APPLIED;
   }
 
@@ -181,13 +193,22 @@ public class DeliveryCallbacks {
     };
   }
 
-  /** {@code reason} and the vendor's code, e.g. {@code BOUNCED, code MAILBOX_UNAVAILABLE}. */
-  private static String detail(String reason, String reasonCode) {
-    String code = reasonCode == null ? null : "code " + reasonCode;
-    if (reason == null) {
-      return code;
+  /**
+   * {@code reason}, the vendor's code, and a message id conflict, e.g. {@code BOUNCED, code
+   * MAILBOX_UNAVAILABLE}; null if there is nothing to say.
+   */
+  private static String detail(String reason, String reasonCode, boolean conflict) {
+    List<String> parts = new ArrayList<>();
+    if (reason != null) {
+      parts.add(reason);
     }
-    return code == null ? reason : reason + ", " + code;
+    if (reasonCode != null) {
+      parts.add("code " + reasonCode);
+    }
+    if (conflict) {
+      parts.add(MESSAGE_ID_CONFLICT);
+    }
+    return parts.isEmpty() ? null : String.join(", ", parts);
   }
 
   private static void afterCommit(Runnable action) {
