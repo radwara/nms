@@ -50,7 +50,7 @@ nms:
     # Both settings are read at startup: a change takes effect on restart.
     window: ${NMS_DEDUP_WINDOW:24h}
   routing:
-    # Channels added per severity (A-26). An opt-out or a missing address withholds them (A-30).
+    # Channels added per severity (A-26). A missing address withholds them; an opt-out does too, except for CRITICAL (A-30).
     severity-escalation:
       CRITICAL: [SMS]
     # Provider per channel; startup fails if a channel has none.
