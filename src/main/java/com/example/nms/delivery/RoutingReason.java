@@ -4,5 +4,7 @@ package com.example.nms.delivery;
 public enum RoutingReason {
   REQUESTED,
   PREFERENCE,
-  SEVERITY_ESCALATION
+  SEVERITY_ESCALATION,
+  /** CRITICAL routed a channel the recipient opted out of (A-30). */
+  OPT_OUT_OVERRIDDEN_CRITICAL
 }

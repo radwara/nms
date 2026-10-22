@@ -42,7 +42,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.IllegalTransactionStateException;
 
 /**
- * #9: routing through a real submission against the seeded directory and the default policy in
+ * #9, #15: routing through a real submission against the seeded directory and the default policy in
  * {@code application.yml} ({@code CRITICAL: [SMS]}, {@code sim-email}, {@code sim-sms}). The clock
  * is fixed at {@link com.example.nms.support.TestEntities#NOW}.
  */
@@ -150,16 +150,74 @@ class RoutingIT {
   }
 
   @Test
-  void escalationIsWithheldWhenOptedOutOfSms() {
+  void criticalEscalationOverridesSmsOptOut() {
     UUID id = submitOne(Severity.CRITICAL, "user-sms-optout", EMAIL);
 
-    assertThat(routes(id)).containsExactly("EMAIL REQUESTED");
+    assertThat(routes(id)).containsExactly("EMAIL REQUESTED", "SMS OPT_OUT_OVERRIDDEN_CRITICAL");
     assertThat(history(id))
         .containsExactly(
             "ACCEPTED",
             "ROUTED EMAIL REQUESTED",
-            "ROUTE_REMOVED SMS SEVERITY_ESCALATION withheld: OPTED_OUT",
+            "ROUTED SMS OPT_OUT_OVERRIDDEN_CRITICAL",
+            "QUEUED EMAIL",
+            "QUEUED SMS");
+  }
+
+  @Test
+  void criticalRequestedChannelOverridesOptOut() {
+    UUID id = submitOne(Severity.CRITICAL, "user-sms-optout", SMS);
+
+    assertThat(routes(id)).containsExactly("SMS OPT_OUT_OVERRIDDEN_CRITICAL");
+    assertThat(history(id))
+        .containsExactly("ACCEPTED", "ROUTED SMS OPT_OUT_OVERRIDDEN_CRITICAL", "QUEUED SMS");
+  }
+
+  @Test
+  void criticalWithoutChannelsOverridesOptOut() {
+    UUID id = submitOne(Severity.CRITICAL, "user-sms-optout", null);
+
+    assertThat(routes(id)).containsExactly("EMAIL PREFERENCE", "SMS OPT_OUT_OVERRIDDEN_CRITICAL");
+    assertThat(history(id))
+        .containsExactly(
+            "ACCEPTED",
+            "ROUTED EMAIL PREFERENCE",
+            "ROUTED SMS OPT_OUT_OVERRIDDEN_CRITICAL",
+            "QUEUED EMAIL",
+            "QUEUED SMS");
+  }
+
+  @Test
+  void criticalOptedOutChannelWithoutAddressIsRemovedAsNoAddress() {
+    // Synthetic test-only recipient; the seeded directory (V2) stays unchanged.
+    jdbc.update(
+        "merge into recipient (id, email, phone) key (id) values (?, ?, null)",
+        "test-optout-no-phone",
+        "ok.delivered@sim.test");
+    jdbc.update(
+        "merge into channel_preference (recipient_id, channel, enabled) key (recipient_id, channel)"
+            + " values (?, 'SMS', false)",
+        "test-optout-no-phone");
+
+    UUID id = submitOne(Severity.CRITICAL, "test-optout-no-phone", null);
+
+    assertThat(routes(id)).containsExactly("EMAIL PREFERENCE");
+    assertThat(history(id))
+        .containsExactly(
+            "ACCEPTED",
+            "ROUTED EMAIL PREFERENCE",
+            "ROUTE_REMOVED SMS NO_ADDRESS",
+            "ROUTE_REMOVED SMS SEVERITY_ESCALATION withheld: NO_ADDRESS",
             "QUEUED EMAIL");
+  }
+
+  @Test
+  void warningOptedOutChannelIsStillRemoved() {
+    UUID id = submitOne(Severity.WARNING, "user-sms-optout", SMS_EMAIL);
+
+    assertThat(routes(id)).containsExactly("EMAIL REQUESTED");
+    assertThat(history(id))
+        .containsExactly(
+            "ACCEPTED", "ROUTE_REMOVED SMS OPTED_OUT", "ROUTED EMAIL REQUESTED", "QUEUED EMAIL");
   }
 
   @Test
@@ -275,14 +333,15 @@ class RoutingIT {
 
     assertThat(routes(ids.get(0))).containsExactly("EMAIL PREFERENCE", "SMS PREFERENCE");
     assertThat(routes(ids.get(1))).containsExactly("EMAIL PREFERENCE");
-    assertThat(routes(ids.get(2))).containsExactly("EMAIL PREFERENCE");
+    assertThat(routes(ids.get(2)))
+        .containsExactly("EMAIL PREFERENCE", "SMS OPT_OUT_OVERRIDDEN_CRITICAL");
     assertThat(history(ids.get(2)))
         .containsExactly(
             "ACCEPTED",
             "ROUTED EMAIL PREFERENCE",
-            "ROUTE_REMOVED SMS OPTED_OUT",
-            "ROUTE_REMOVED SMS SEVERITY_ESCALATION withheld: OPTED_OUT",
-            "QUEUED EMAIL");
+            "ROUTED SMS OPT_OUT_OVERRIDDEN_CRITICAL",
+            "QUEUED EMAIL",
+            "QUEUED SMS");
   }
 
   @Test

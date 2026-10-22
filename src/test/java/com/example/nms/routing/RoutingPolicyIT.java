@@ -80,7 +80,26 @@ class RoutingPolicyIT {
             tuple(Channel.SMS, RoutingReason.SEVERITY_ESCALATION, "alt-sms"));
   }
 
+  @Test
+  void warningEscalationIsStillWithheldWhenOptedOut() {
+    UUID id = submit(Severity.WARNING, "user-sms-optout", List.of(Channel.EMAIL));
+
+    assertThat(deliveriesOf(id))
+        .extracting(Delivery::getChannel, Delivery::getRoutingReason)
+        .containsExactly(tuple(Channel.EMAIL, RoutingReason.REQUESTED));
+    assertThat(
+            jdbc.queryForList(
+                "select detail from audit_event where notification_id = ? and type = 'ROUTE_REMOVED'",
+                String.class,
+                id))
+        .containsExactly("SEVERITY_ESCALATION withheld: OPTED_OUT");
+  }
+
   private UUID submit(Severity severity, List<Channel> channels) {
+    return submit(severity, "user-ok", channels);
+  }
+
+  private UUID submit(Severity severity, String userId, List<Channel> channels) {
     SubmitResult result =
         intake.submit(
             new SubmitCommand(
@@ -90,7 +109,7 @@ class RoutingPolicyIT {
                 "FRAUD_ALERT",
                 severity,
                 Priority.NORMAL,
-                List.of(new SubmitCommand.Recipient("user-ok", channels)),
+                List.of(new SubmitCommand.Recipient(userId, channels)),
                 "subject",
                 "body",
                 null,
