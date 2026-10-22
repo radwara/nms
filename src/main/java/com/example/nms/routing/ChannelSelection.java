@@ -66,7 +66,7 @@ final class ChannelSelection {
         decisions.add(new Removed(channel, unusable));
       } else {
         selected.add(channel);
-        decisions.add(new Selected(channel, selectedReason(channel, reason, optedOut)));
+        decisions.add(new Selected(channel, selectedReason(channel, reason, critical, optedOut)));
       }
     }
 
@@ -81,7 +81,8 @@ final class ChannelSelection {
         selected.add(channel);
         decisions.add(
             new Selected(
-                channel, selectedReason(channel, RoutingReason.SEVERITY_ESCALATION, optedOut)));
+                channel,
+                selectedReason(channel, RoutingReason.SEVERITY_ESCALATION, critical, optedOut)));
       }
     }
     return decisions;
@@ -102,9 +103,11 @@ final class ChannelSelection {
     return null;
   }
 
-  /** A usable channel the recipient opted out of is only selected because it is CRITICAL. */
+  /** A CRITICAL channel the recipient opted out of is labelled as an override. */
   private static RoutingReason selectedReason(
-      Channel channel, RoutingReason reason, Set<Channel> optedOut) {
-    return optedOut.contains(channel) ? RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL : reason;
+      Channel channel, RoutingReason reason, boolean critical, Set<Channel> optedOut) {
+    return critical && optedOut.contains(channel)
+        ? RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL
+        : reason;
   }
 }
