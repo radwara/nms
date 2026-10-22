@@ -24,6 +24,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Accepted` = sig
 | A-16 | Schedule time in the past / expiration in the past | Past schedule = send now. Past expiration = reject 422 | Accepted |
 | A-17 | Who are the API callers, how are they authenticated? | API key per source system (from config). `sourceSystem` is taken from the key, not trusted from the body  (ADR-0001) | Accepted |
 | A-18 | Spec 4.1 lists one "notification identifier" for a request with 1..n recipients | The spec's "notification" is our submission (one request). Identifiers are per recipient by design: one `notificationId` each; the shared `submissionId` stays internal (#8, ADR-0002) | Accepted |
+| A-19 | Does priority still order sends when EMAIL goes through Kafka (A-15)? | No, for the Kafka path only: the consumer works in topic order, so under consumer lag a CRITICAL EMAIL waits behind earlier messages, at worst until the poller takes it by priority after the grace. Documented, not fixed; a priority topic is the production path (engineer decision, #47, ADR-0008) | Accepted |
 
 ## Status (4.2)
 
@@ -73,6 +74,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Accepted` = sig
 | A-47 | Callback for a delivery not yet sent or between retries (`PENDING`, `RETRY_SCHEDULED`), e.g. a vendor that accepted a send we classified as `TIMEOUT` | `RETRY_SCHEDULED`: applied. The vendor may have accepted a request we marked as timed out, and it will dedupe our retry, so ignoring the callback could leave the delivery stuck in SENT forever (engineer). The vendor's callback is the authoritative outcome of an attempt it accepted; the write clears `next_attempt_at` and bumps `version`, so the pending retry is never claimed and nothing is sent twice. `PENDING` (never sent): ignored, audited `CALLBACK_IGNORED` (engineer decision, #11; ADR-0003 revision) | Accepted |
 | A-48 | Late callback for a delivery that expired after a lease reclaim (it may have been sent) | Stays `EXPIRED` (final states never change); audited `CALLBACK_IGNORED` with `late after expiry; event ...`, so the vendor's outcome stays in the history (engineer decision, #11) | Accepted |
 | A-49 | Failure reason for a vendor `FAILED` callback | `PROVIDER_FAILED` (bounce: `BOUNCED`). The vendor's `reasonCode` is restricted to code characters and audited only, not stored on the delivery (engineer decision, #11) | Accepted |
+| A-50 | Does our own outbound rate limit (not a provider 429, A-41) spend attempts? Does CRITICAL bypass it? | No and no. Over the limit a delivery waits for the next window with status and attempts unchanged; `expiresAt` stays the only deadline. Key (source system, channel); no CRITICAL bypass (engineer decision, #46, ADR-0007) | Accepted |
 
 ## Questions for the hiring team
 
