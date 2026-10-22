@@ -15,38 +15,52 @@ Requires Java 21. No other installs.
 ./mvnw spring-boot:run   # http://localhost:8080/actuator/health
 ```
 
+Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
+
 ## Run the demo
 
-Needs `curl` and `jq`. The `dev` profile turns on the delivery worker, the simulated vendors' callbacks, and the documented demo credentials (ADR-0001).
+Needs `curl` and `jq`. The delivery worker is on by default; the `dev` profile adds the simulated vendors' callbacks, the documented demo credentials (ADR-0001), the H2 console, and plain-text logs.
 
 ```
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev   # terminal 1; H2 file database in ./data (NMS_DATA_DIR: absolute path)
 scripts/demo.sh                                         # terminal 2; NMS_BASE_URL, NMS_API_KEY, DEMO_TIMEOUT override the defaults
 ```
 
-Seven steps against the HTTP API: health, happy path, retry, duplicate submission, bounce, a validation error, an authentication error. Each step polls status until final (30 s timeout) and the script exits non-zero on any unexpected result. CI runs it against the built jar. Excerpt:
+Eight steps against the HTTP API: health, happy path, routing (requested channel, severity escalation, opt-out), retry, duplicate submission, bounce, a validation error, an authentication error. Steps 2-6 poll status until final (30 s timeout) and each submission uses its own `eventId`; the script exits non-zero on any unexpected result. CI runs it against the built jar. Excerpt:
 
 ```
-== 3. Retry path: user-flaky2, two transient failures (503), then accepted and delivered
-   POST /api/v1/notifications  key=demo-1792641124-26102-user-flaky2  -> 202  user-flaky2 ACCEPTED 072d3b15-...
-   GET  /api/v1/notifications/072d3b15-...  -> 200  overallStatus=DELIVERED  duplicateSubmissions=0
+== 3. Routing: CRITICAL adds SMS; an opt-out withholds it (opt-out wins until #15)
+   POST /api/v1/notifications  key=demo-1792642057-244-routing  -> 202
+        user-ok ACCEPTED 51c807e3-...
+        user-sms-optout ACCEPTED 059815ec-...
+   GET  /api/v1/notifications/51c807e3-...  -> 200  user-ok  overallStatus=DELIVERED  requestedChannels=["EMAIL"]  duplicateSubmissions=0
+        EMAIL  DELIVERED  attempts=1
+        SMS  DELIVERED  attempts=1
+   GET  /api/v1/notifications/51c807e3-.../audit  -> 200
+        ACCEPTED ROUTED(EMAIL) ROUTED(SMS) QUEUED(EMAIL) QUEUED(SMS) SENT(EMAIL) SENT(SMS)
+        DELIVERED(EMAIL) DELIVERED(SMS)
+        routing: ROUTED EMAIL: REQUESTED
+        routing: ROUTED SMS: SEVERITY_ESCALATION
+   GET  /api/v1/notifications/059815ec-...  -> 200  user-sms-optout  overallStatus=DELIVERED  requestedChannels=none  duplicateSubmissions=0
+        EMAIL  DELIVERED  attempts=1
+   GET  /api/v1/notifications/059815ec-.../audit  -> 200
+        ACCEPTED ROUTED(EMAIL) ROUTE_REMOVED(SMS) ROUTE_REMOVED(SMS) QUEUED(EMAIL) SENT(EMAIL)
+        DELIVERED(EMAIL)
+        routing: ROUTED EMAIL: PREFERENCE
+        routing: ROUTE_REMOVED SMS: OPTED_OUT
+        routing: ROUTE_REMOVED SMS: SEVERITY_ESCALATION withheld: OPTED_OUT
+   OK
+
+== 4. Retry path: user-flaky2, two transient failures (503), then accepted and delivered
+   ...
         EMAIL  DELIVERED  attempts=3
         SMS  DELIVERED  attempts=3
-   GET  /api/v1/notifications/072d3b15-.../audit  -> 200
-        ACCEPTED ROUTED(EMAIL) ROUTED(SMS) QUEUED(EMAIL) QUEUED(SMS) ATTEMPT_FAILED(SMS)
-        RETRY_SCHEDULED(SMS) ATTEMPT_FAILED(EMAIL) RETRY_SCHEDULED(EMAIL) ... SENT(EMAIL) DELIVERED(SMS) DELIVERED(EMAIL)
-   OK
-
-== 5. Bounce: user-bounce, email accepted, then bounced by vendor callback
    ...
-        EMAIL  FAILED  attempts=1  reason=BOUNCED
-   OK
-
-== 6. Validation error: submit without Idempotency-Key
+== 7. Validation error: submit without Idempotency-Key
    POST /api/v1/notifications  (no Idempotency-Key)  -> 400  [{"code":4001,"field":"Idempotency-Key","message":"Required header is missing"}]
    OK
 ...
-Demo passed: 7 steps.
+Demo passed: 8 steps.
 ```
 
 ## Docs
