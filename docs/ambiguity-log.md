@@ -1,13 +1,13 @@
 # Ambiguity Log
 
-Gaps and unclear points in the spec, with the assumption taken. `Proposed` = drafted, awaiting engineer sign-off. `Accepted` = signed off (remaining drafts accepted at design freeze, 2026-10-20). `Asked` = sent to the hiring team. `Open` = worked as a scenario.
+Gaps and unclear points in the spec, with the assumption taken. `Accepted` = signed off by the engineer (remaining drafts accepted at design freeze, 2026-10-20). `No reply` = asked the hiring team on 2026-10-20, no answer received; the assumption stands.
 
 ## Spec-level
 
 | ID | Ambiguity | Assumption / decision | Status |
 |---|---|---|---|
-| A-01 | Sections 4.6-4.8 are missing (numbering jumps 4.5 -> 4.9) | Do not invent requirements. Ask the hiring team; proceed with what is written | Asked |
-| A-02 | Section 3.3 (ambiguous scenario) has no content | Choose a realistic ambiguous requirement ourselves (see A-30) | Asked |
+| A-01 | Sections 4.6-4.8 are missing (numbering jumps 4.5 -> 4.9) | Do not invent requirements. Ask the hiring team; proceed with what is written | No reply |
+| A-02 | Section 3.3 (ambiguous scenario) has no content | Choose a realistic ambiguous requirement ourselves (see A-30) | No reply |
 | A-03 | PDF says 2-3 days; email says 6-8 focused hours, max 10; deadline 10/22 | Plan for ~8 focused hours; scope accordingly | Accepted |
 | A-04 | Brownfield text "(a new notification channel/ deduplication Refactor provider-specific logic)" parses several ways | Brownfield = event-level deduplication: the same event **and** message resubmitted for a recipient under a new idempotency key, within the window, after a routed original (a `NOT_ROUTED` one does not count, #41), is suppressed and reflected in the response, status, and audit. Key `(source_system, event_id, type, recipient_id, content_hash)`, hash over subject, body, severity; a different message for the same `eventId` is delivered (engineer decision, #14, ADR-0006). Real multi-layer change (schema, intake, status, audit, metrics). Changed after design review; engineer decision | Accepted |
 
@@ -24,6 +24,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-16 | Schedule time in the past / expiration in the past | Past schedule = send now. Past expiration = reject 422 | Accepted |
 | A-17 | Who are the API callers, how are they authenticated? | API key per source system (from config). `sourceSystem` is taken from the key, not trusted from the body  (ADR-0001) | Accepted |
 | A-18 | Spec 4.1 lists one "notification identifier" for a request with 1..n recipients | The spec's "notification" is our submission (one request). Identifiers are per recipient by design: one `notificationId` each; the shared `submissionId` stays internal (#8, ADR-0002) | Accepted |
+| A-19 | Does priority still order sends when EMAIL goes through Kafka (A-15)? | No, for the Kafka path only: the consumer works in topic order, so under consumer lag a CRITICAL EMAIL waits behind earlier messages, at worst until the poller takes it by priority after the grace. Documented, not fixed; a priority topic is the production path (engineer decision, #47, ADR-0008) | Accepted |
 
 ## Status (4.2)
 
@@ -43,15 +44,21 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-26 | "Configurable channels": configured where? | Routing policy in `application.yml`; preferences in the seeded directory. No admin API | Accepted |
 | A-27 | Which channels exist? | EMAIL and SMS (simulated providers) | Accepted |
 
+## Ambiguous scenario (3.3)
+
+| ID | Ambiguity | Assumption / decision | Status |
+|---|---|---|---|
+| A-30 | A CRITICAL alert targets a recipient who opted out of the channel the policy wants to use. Which wins? | CRITICAL overrides opt-out on every channel (`OPT_OUT_OVERRIDDEN_CRITICAL`); INFO / WARNING respect it; a missing address always removes the channel (engineer, PR #43; scenarios/ambiguous.md) | Accepted |
+
 ## Dedup and idempotency (4.4)
 
 | ID | Ambiguity | Assumption / decision | Status |
 |---|---|---|---|
 | A-35 | Dedup boundary | Submission: one outcome per (source system, idempotency key). A request with N recipients becomes N notifications sharing an internal `submissionId`. Delivery: one per (notification, channel), unique constraint. Callbacks: deduped by delivery state (only `SENDING`, `SENT`, `RETRY_SCHEDULED` change; repeats and late events are audited `CALLBACK_IGNORED`), no event key (#2, ADR-0002, ADR-0003, A-47). Event: at most one routed original per `(source_system, event_id, type, recipient_id, content_hash)` per dedup window (outside the D8 race); later repeats under a new key are suppressed (#14, ADR-0006, A-39) | Accepted |
-| A-38 | Recipients per request; unknown recipient | Max 100. Any unknown recipient rejects the whole request (422 / 4223), all listed. Atomic: one key = one outcome (#2) | Accepted |
 | A-36 | Retention | Idempotency keys honored for 7 days (configurable); after that a key may create a new notification. The event dedup window (`nms.dedup.window`, 24h) is a separate setting: a reused key after retention is a new submission and then goes through dedup (#14) | Accepted |
-| A-39 | Event dedup window, precedence, and message identity | Window 24h from the original's submission, strict, anchored on originals only; off switch `nms.dedup.enabled`, no shadow mode. Idempotency replay / 409 and 422 run first; dedup never changes those answers. Message identity = SHA-256 of subject, body, severity exactly as validated; channels, priority, and times are not part of it. Only routed originals anchor: a `NOT_ROUTED` original does not; `FAILED` and `EXPIRED` do (D3 option B, engineer, #41 review). Settings are read at startup. Concurrent repeats can both pass (limitation) (engineer decisions D1-D9, #14, ADR-0006) | Accepted |
 | A-37 | Exactly-once delivery? | Not achievable with external providers. At-least-once with a per-delivery provider idempotency key; documented as a limitation | Accepted |
+| A-38 | Recipients per request; unknown recipient | Max 100. Any unknown recipient rejects the whole request (422 / 4223), all listed. Atomic: one key = one outcome (#2) | Accepted |
+| A-39 | Event dedup window, precedence, and message identity | Window 24h from the original's submission, strict, anchored on originals only; off switch `nms.dedup.enabled`, no shadow mode. Idempotency replay / 409 and 422 run first; dedup never changes those answers. Message identity = SHA-256 of subject, body, severity exactly as validated; channels, priority, and times are not part of it. Only routed originals anchor: a `NOT_ROUTED` original does not; `FAILED` and `EXPIRED` do (D3 option B, engineer, #41 review). Settings are read at startup. Concurrent repeats can both pass (limitation) (engineer decisions D1-D9, #14, ADR-0006) | Accepted |
 
 ## Retry and failures (4.5)
 
@@ -67,14 +74,11 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-47 | Callback for a delivery not yet sent or between retries (`PENDING`, `RETRY_SCHEDULED`), e.g. a vendor that accepted a send we classified as `TIMEOUT` | `RETRY_SCHEDULED`: applied. The vendor may have accepted a request we marked as timed out, and it will dedupe our retry, so ignoring the callback could leave the delivery stuck in SENT forever (engineer). The vendor's callback is the authoritative outcome of an attempt it accepted; the write clears `next_attempt_at` and bumps `version`, so the pending retry is never claimed and nothing is sent twice. `PENDING` (never sent): ignored, audited `CALLBACK_IGNORED` (engineer decision, #11; ADR-0003 revision) | Accepted |
 | A-48 | Late callback for a delivery that expired after a lease reclaim (it may have been sent) | Stays `EXPIRED` (final states never change); audited `CALLBACK_IGNORED` with `late after expiry; event ...`, so the vendor's outcome stays in the history (engineer decision, #11) | Accepted |
 | A-49 | Failure reason for a vendor `FAILED` callback | `PROVIDER_FAILED` (bounce: `BOUNCED`). The vendor's `reasonCode` is restricted to code characters and audited only, not stored on the delivery (engineer decision, #11) | Accepted |
-
-## Ambiguous scenario candidate
-
-| ID | Ambiguity | Assumption / decision | Status |
-|---|---|---|---|
-| A-30 | A CRITICAL alert targets a recipient who opted out of the channel the policy wants to use. Which wins? | CRITICAL overrides opt-out on every channel (`OPT_OUT_OVERRIDDEN_CRITICAL`); INFO / WARNING respect it; a missing address always removes the channel (engineer, PR #43; scenarios/ambiguous.md) | Accepted |
+| A-50 | Does our own outbound rate limit (not a provider 429, A-41) spend attempts? Does CRITICAL bypass it? | No and no. Over the limit a delivery waits for the next window with status and attempts unchanged; `expiresAt` stays the only deadline. Key (source system, channel); no CRITICAL bypass (engineer decision, #46, ADR-0007) | Accepted |
 
 ## Questions for the hiring team
+
+Sent 2026-10-20; no reply received.
 
 1. Sections 4.6-4.8 appear to be missing. Are there requirements there, or is it a numbering gap? (A-01)
 2. Section 3.3 has no content. Is the ambiguous scenario ours to choose? (A-02)

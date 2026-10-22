@@ -35,9 +35,16 @@ Spec 4.3 lists routing factors (requested channel, severity, recipient preferenc
 - Assumed answers above are unconfirmed (A-30). The rule lives in one place, so it is easy to reverse.
 
 ## 2. Execution
-- Write-up: PR #43. Code: routing change for #15. `ChannelSelection.decide` takes the severity; for `CRITICAL` an opt-out no longer makes a channel unusable, and an opted-out channel that is selected gets `RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL`. No schema change (`routing_reason` is `varchar(32)`, no check constraint), no config.
+- Write-up: PR #43 (options and decision, reviewed before code). Code: PR #45. `ChannelSelection.decide` takes the severity; for `CRITICAL` an opt-out no longer makes a channel unusable, and an opted-out channel that is selected gets `RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL`. No schema change (`routing_reason` is `varchar(32)`, no check constraint), no config.
 - Changed (opt-out-wins cases for CRITICAL): `ChannelSelectionTest` (escalation withheld when opted out; removed candidate reported as withheld escalation), `RoutingIT` (escalation withheld when opted out of SMS; multi-recipient case), `SubmitNotificationIT` (delivery count 4 -> 5; found by the build, approved by the engineer), `RoutingPolicyIT` (added `#warningEscalationIsStillWithheldWhenOptedOut`, WARNING guard), demo step 3, README excerpt, `ChannelSelection` Javadoc, architecture.md Routing steps 2-3.
 - Unchanged on purpose: INFO / WARNING opt-out tests (guard that opt-out still applies).
+
+| PR | Review | Findings | Outcome |
+|---|---|---|---|
+| [#43](https://github.com/radwara/nms/pull/43#issuecomment-6346762733) | General (write-up vs spec 4.3, A-30, `ChannelSelection`) | 10: 3 high (override scope, audit reason undefined, flipped tests unlisted), 4 medium, 3 low | Scope: engineer decision (every channel; a missing address still removes it). Rest fixed in `638c4d3` |
+| [#45](https://github.com/radwara/nms/pull/45#issuecomment-6348293712) | Bug finder, architecture | 6, no defects: `selectedReason` relied on filter order; dedup changeover; stale docs (3); reason for an overridden escalation | Fixed in `cae74cb`, `d2c9e0b`; changeover documented (Limitations); reason kept by engineer, origin derivation documented (`b130871`) |
+
+Performance check skipped on #45: no new queries or loops.
 
 ## 3. Validation
 
@@ -57,3 +64,5 @@ ITs assert the full audit history: an overridden channel is one `ROUTED <channel
   - `INFO`: `requestedChannelsAreTheCandidatesInRequestOrder`, `withoutRequestedChannelsTheEnabledChannelsAreUsed`, `withoutRequestedChannelsAnOptedOutChannelIsRemoved`, `withoutRequestedChannelsEveryOptOutIsRemoved`, `optedOutRequestedChannelIsRemoved`, `channelWithoutAddressIsRemoved`, `optOutIsReportedBeforeAMissingAddress`.
   - `CRITICAL` (no opt-out, so the override does not apply): `escalationAddsItsChannelAfterTheCandidates`, `escalationIsWithheldWithoutAnAddress`, `channelBothRequestedAndEscalatedKeepsRequested`, `channelFromPreferencesAndEscalatedKeepsPreference`, `nothingSelectedWhenNoChannelIsUsable`.
 - Demo step 3, `user-sms-optout` (CRITICAL, no channels requested): deliveries `EMAIL`, `SMS`; audit `ROUTED EMAIL: PREFERENCE`, `ROUTED SMS: OPT_OUT_OVERRIDDEN_CRITICAL`, no `ROUTE_REMOVED`.
+
+`./mvnw -B verify` after #45: 317 unit + 280 integration tests, 0 failures; 96.4% line coverage (JaCoCo, unit + IT merged).

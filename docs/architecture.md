@@ -41,6 +41,21 @@ flowchart LR
 | Status + audit | Read models; overall status derived on read |
 | Directory | Seeded recipients, contact addresses, channel preferences |
 
+## Key decisions
+
+| Decision | Choice | Record |
+|---|---|---|
+| Caller auth | Hashed, rotatable API key per source system; `sourceSystem` from the key; per-provider webhook token | [ADR-0001](adr/0001-api-authentication.md) |
+| Unit of tracking | One notification per recipient; required `Idempotency-Key`, honored 7 days | [ADR-0002](adr/0002-per-recipient-notifications-and-idempotency.md) |
+| Delivery status | Two-phase: vendor 200 = `SENT`, final outcome by callback; no callback stays `SENT` | [ADR-0003](adr/0003-two-phase-delivery-status.md) |
+| Queue | `delivery` table polled by one worker; versioned claim committed before the send; EMAIL first dispatch optionally via Kafka (ADR-0008) | [ADR-0004](adr/0004-database-backed-delivery-queue.md) |
+| Stack | Java 21, Spring Boot, H2 (PostgreSQL mode), Flyway, JPA; one module, packaged by feature | [ADR-0005](adr/0005-technology-stack.md) |
+| Event dedup | Same event and message per recipient within 24h suppressed; routed originals only | [ADR-0006](adr/0006-event-level-deduplication.md) |
+| Outbound rate limit | Fixed window in memory per (source system, channel), before the claim; over the limit the key's due rows wait for the window end, attempts unchanged; no CRITICAL bypass | [ADR-0007](adr/0007-outbound-rate-limit.md) |
+| EMAIL fast path | Optional Kafka publish of EMAIL delivery ids after commit, off by default; the poller reconciles after a 30s grace; not an outbox | [ADR-0008](adr/0008-kafka-fast-path-email.md) |
+| Overall status | Derived on read from deliveries, never stored | A-21, [Overall status](#overall-status-derived-on-read) |
+| CRITICAL vs opt-out | CRITICAL overrides opt-out on every channel; fixed rule | A-30, [ambiguous scenario](scenarios/ambiguous.md) |
+
 ## API
 
 API endpoints are under `/api/v1` (actuator is at `/actuator`, outside it). Callers authenticate with `X-API-Key` (ADR-0001). A source system can only read its own notifications.
@@ -531,7 +546,7 @@ sequenceDiagram
     end
 ```
 
-- One single-threaded poller (plus the Kafka consumer thread when enabled, ADR-0008). Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
+- One single-threaded poller (plus `nms.kafka.concurrency` Kafka consumer threads when enabled, ADR-0008). Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
 - Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.

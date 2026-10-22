@@ -19,7 +19,7 @@ Brownfield starts with a written impact analysis of the tagged greenfield code. 
 | Role | Who |
 |---|---|
 | Engineer | Decides, approves gates, reviews and merges PRs |
-| Orchestrator (AI session) | Plans the issue, briefs the implementer, checks output against acceptance criteria, opens the PR, runs reviewers, brings findings to the engineer |
+| Orchestrator (AI session) | Engineer directs; AI drafts and runs reviews; engineer approves and merges. The AI session plans the issue, briefs the implementer, checks output against acceptance criteria, opens the PR, runs reviewers, and brings findings to the engineer |
 | Implementer (AI subagent) | Writes code and tests for one issue on its branch; runs `./mvnw verify`; does not push |
 | Reviewers (AI subagents, fresh context) | Bug, architecture, performance, and general reviews per PR |
 
@@ -51,7 +51,7 @@ Milestone PRs widen the focus:
 | Greenfield tag (#13) | Code vs `architecture.md` drift; spec coverage |
 | Brownfield impact analysis (#14) | Missed layers, regression risk, test plan, before any code |
 | Ambiguous options (#15) | Are the options and questions real; is the decision defensible |
-| Final (#16) | Acts as the grader: runs the README from a fresh clone, checks every requirement |
+| Final (#16) | Acts as the final reviewer: runs the README from a fresh clone, checks every requirement |
 
 ## Checks
 
@@ -63,7 +63,6 @@ Milestone PRs widen the focus:
 | Dependencies | Dependabot for Maven and GitHub Actions |
 | Review | Independent reviewer + engineer review on every PR |
 | Traceability | `requirements.md` Test column filled per merged requirement |
-| Scope | Hours logged per milestone against the budget; cut list from the design review applied when behind |
 
 ## Definition of done
 

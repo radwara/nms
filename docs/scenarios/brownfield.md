@@ -296,7 +296,14 @@ Deviations from this analysis:
 
 | PR | Review | Findings | Outcome |
 |---|---|---|---|
-| _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+| [#31](https://github.com/radwara/nms/pull/31#issuecomment-6328879557) | General (impact analysis) | 12: H1 `eventId` as correlation id, M3 severity upgrade, M1-M2, M4-M5, L1-L6 | H1, M3: engineer changed the key to include `content_hash`, no shadow mode (D1); rest applied in `2cdc3b1` |
+| [#41](https://github.com/radwara/nms/pull/41#issuecomment-6346023484) | Bug finder | 3: a `NOT_ROUTED` original blocked a corrected resend for 24h ([#44](https://github.com/radwara/nms/issues/44)); V3 verified on H2 only; old constructor could write rows without a hash | Engineer decision D3 option B; production item documented; constructor guarded |
+| #41 | Architecture (brownfield discipline) | Discipline held (refactor `3d9a72c`, zero test diff, CI green alone). 2: rollback docs (reverting deletes V3), undocumented deviation and wording drift | Fixed: forward-only schema note, deviations listed |
+| #41 | Performance (H2, PostgreSQL 17) | 1: lookup read every suppressed repeat (85 ms at 100k rows; H2 ignored the V3 index) | Fixed: index reordered, no recipient `IN` list, `scanCount` guard (`EventDedupLookupIT`), `nms.dedup.lookup` timer |
+| #41 | General | 1: no CI proof for the refactor commit, PR numbers missing, review table empty, bare sign-offs | Fixed: CI run linked, PRs named, reasons for D3 / D8 |
+| #41 | Implementer (while fixing) | 1: race and metrics tests used stub routing | Fixed: real routing via a delegating gate |
+
+#41 total: 8 findings; 6 fixed, 1 engineer decision (bug #44), 1 documented production item.
 
 ## Validation
 
