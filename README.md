@@ -17,6 +17,8 @@ Requires Java 21. No other installs.
 
 Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Outbound sends are rate limited per source system and channel (`nms.rate-limit.*`: EMAIL 600, SMS 60, other channels 30 per minute; ADR-0007). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
 
+Kafka mode (ADR-0008, off by default; needs a broker): `NMS_KAFKA_ENABLED=true SPRING_KAFKA_BOOTSTRAP_SERVERS=host:9092 ./mvnw spring-boot:run`. EMAIL first dispatch then goes through topic `nms.delivery.email`; the poller sends anything Kafka missed after `nms.kafka.poller-grace` (30s). Tests use an in-JVM broker; no install needed.
+
 ## Run the demo
 
 Needs `curl` and `jq`. The delivery worker is on by default; the `dev` profile adds the simulated vendors' callbacks, the documented demo credentials (ADR-0001), the H2 console, and plain-text logs.

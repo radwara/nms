@@ -2,6 +2,7 @@ package com.example.nms.routing;
 
 import com.example.nms.audit.AuditRecorder;
 import com.example.nms.common.Channel;
+import com.example.nms.delivery.DeliveriesQueued;
 import com.example.nms.delivery.Delivery;
 import com.example.nms.delivery.DeliveryRepository;
 import com.example.nms.directory.AddressPresence;
@@ -22,12 +23,14 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 /**
  * Turns each new notification into {@code PENDING} deliveries, one per selected channel, inside the
  * submit transaction. Reads the directory with one address query and one opt-out query per
- * submission; makes no provider calls. Audits every decision, then {@code QUEUED} per delivery.
+ * submission; makes no provider calls. Audits every decision, then {@code QUEUED} per delivery,
+ * then publishes {@link DeliveriesQueued} (still inside the transaction).
  */
 @Component
 class ChannelRouter implements RoutingStep {
@@ -37,18 +40,21 @@ class ChannelRouter implements RoutingStep {
   private final DeliveryRepository deliveries;
   private final AuditRecorder audit;
   private final RoutingProperties policy;
+  private final ApplicationEventPublisher events;
 
   ChannelRouter(
       RecipientRepository recipients,
       ChannelPreferenceRepository preferences,
       DeliveryRepository deliveries,
       AuditRecorder audit,
-      RoutingProperties policy) {
+      RoutingProperties policy,
+      ApplicationEventPublisher events) {
     this.recipients = recipients;
     this.preferences = preferences;
     this.deliveries = deliveries;
     this.audit = audit;
     this.policy = policy;
+    this.events = events;
   }
 
   @Override
@@ -88,6 +94,13 @@ class ChannelRouter implements RoutingStep {
       created.addAll(route(notification, decisions, now));
     }
     deliveries.saveAll(created);
+    if (!created.isEmpty()) {
+      events.publishEvent(
+          new DeliveriesQueued(
+              created.stream()
+                  .map(d -> new DeliveriesQueued.Queued(d.getId(), d.getChannel()))
+                  .toList()));
+    }
   }
 
   private List<Delivery> route(Notification notification, List<Decision> decisions, Instant now) {

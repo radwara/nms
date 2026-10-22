@@ -22,6 +22,17 @@ spring:
   h2:
     console:
       enabled: false
+  # Used only with nms.kafka.enabled=true (ADR-0008). Broker: SPRING_KAFKA_BOOTSTRAP_SERVERS
+  # (default localhost:9092).
+  kafka:
+    producer:
+      properties:
+        # A publish waits at most this for broker metadata, then fails; the poller sends the row.
+        "[max.block.ms]": 1000
+    consumer:
+      group-id: nms-delivery
+      # A new group starts at the oldest retained message; ids already sent are skipped.
+      auto-offset-reset: earliest
 
 management:
   endpoints:
@@ -70,6 +81,15 @@ nms:
     max-attempts: 3
     # Retry n waits base * 2^(n-1) / 2 plus random up to the same again (equal jitter).
     backoff-base: 500ms
+  kafka:
+    # Kafka fast path for EMAIL first dispatch (ADR-0008). Off: the poller sends everything, no broker.
+    enabled: ${NMS_KAFKA_ENABLED:false}
+    # With Kafka on, the poller takes a new EMAIL first dispatch only once created longer ago than
+    # this, or once moved (postpone, rate-limit deferral). Positive.
+    poller-grace: 30s
+    # Topic partitions (when created here) and consumer threads: the throughput knobs. Positive.
+    partitions: 3
+    concurrency: 3
   rate-limit:
     # Outbound sends per source system and channel per fixed window (ADR-0007); every attempt counts,
     # CRITICAL included. Over the limit a delivery waits for the next window (status unchanged).

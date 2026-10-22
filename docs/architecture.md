@@ -16,6 +16,9 @@ flowchart LR
         API[API + auth] --> INTAKE[Intake + idempotency]
         INTAKE --> ROUTE[Routing]
         ROUTE --> DB[(Database)]
+        ROUTE -.->|after commit, EMAIL ids; nms.kafka.enabled| KAFKA[[Kafka nms.delivery.email]]
+        KAFKA -.-> CONSUMER[Email consumer]
+        CONSUMER --> WORKER
         WORKER[Delivery worker] --> DB
         WORKER --> PROV[Provider adapters]
         HOOK[Webhook handler] --> CB[DeliveryCallbacks] --> DB
@@ -32,6 +35,7 @@ flowchart LR
 | Intake | Idempotency check, split request into one notification per recipient, event dedup (ADR-0006), persist |
 | Routing | Resolve channels per recipient from request, preferences, and policy |
 | Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire; outbound rate limit per source system and channel (ADR-0007) |
+| Kafka fast path (off by default) | After commit, publish EMAIL delivery ids; the consumer runs the worker's per-row path by id; the poller takes EMAIL first dispatch only after a grace window (ADR-0008) |
 | Provider adapters | One per channel: send call and error classification only. Callbacks are parsed in `api.CallbackRequestValidator` (one generic format) and mapped event -> status in `delivery.DeliveryCallbacks`. Production path: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built) |
 | Webhook handler | Authenticate (token filter) and validate the callback, hand it to `DeliveryCallbacks` in `delivery`, which dedupes by state and applies the final status |
 | Status + audit | Read models; overall status derived on read |
@@ -324,7 +328,7 @@ Index `(source_system, event_id, type, content_hash, duplicate_of, routed, creat
 | `priority` | smallint | Copied from the notification (HIGH=0, NORMAL=1, LOW=2) so the poll sorts correctly without a join |
 | `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION`, `OPT_OUT_OVERRIDDEN_CRITICAL` |
 | `attempt_count` | int | Send attempts started; incremented by the claim, so an attempt lost to a crash counts |
-| `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
+| `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at, created_at)` serves the poll (V4, #51) |
 | `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
 | `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `PROVIDER_FAILED`, `RETRIES_EXHAUSTED` |
@@ -527,11 +531,11 @@ sequenceDiagram
     end
 ```
 
-- One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
+- One single-threaded poller (plus the Kafka consumer thread when enabled, ADR-0008). Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
 - Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
-- The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
+- The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by status, priority, next_attempt_at, created_at limit :n`, 6 range scans that stop after `n` rows: H2 follows the index for the order only when the ORDER BY lists the index columns from the first; 5,000 due rows: 20 read, 5,001 with `order by next_attempt_at, created_at`, #51) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
 - When a poll sees a full batch due, the poller polls again at once, for up to one poll interval, so a backlog drains at send speed instead of one batch per interval.
 - Rows are worked one at a time: claim, send, outcome.
 - Rate limit (ADR-0007): after every pre-send check and just before the claim, each attempt (retries and lease reclaims included, CRITICAL too) takes one unit of a fixed window per (source system, channel). On the first denial of a key in a poll, one set-based update moves every due row of that key (`PENDING` / `RETRY_SCHEDULED` due, `SENDING` past the lease) to the window end and bumps `version`, so other sources go out on the next poll; the key is skipped for the rest of the batch. Status and attempts unchanged, no audit, DEBUG log, `nms.delivery.deferred` per row. A unit whose claim is lost or throws is released. The limiter is safe for concurrent callers (#47). Poll order breaks `next_attempt_at` ties by `created_at` (FIFO within a source). A row deferred past `expiresAt` expires on its next poll (existing path). The vendor's own quota stays reactive (429, A-41).
@@ -540,6 +544,21 @@ sequenceDiagram
 - Shutdown: the worker stops between deliveries when the context closes or the thread is interrupted; the poller's scheduler waits `send-timeout` + 5s for the delivery in progress.
 - Each attempt runs under a fresh trace id, so its log lines (ids, channel, category, resulting state) can be grouped. Addresses and content are never logged.
 - `AUTH_ERROR` is also logged at ERROR: it means our credentials are wrong, not the recipient.
+- Kafka fast path (ADR-0008, `nms.kafka.enabled`, off by default): after the submit transaction commits, each EMAIL delivery id is handed to one publish thread (bounded queue of 1,000 submissions; full: counted failed) and published to `nms.delivery.email` (key and value = id), so the request returns without waiting for Kafka and releases its connection; the producer is warmed at startup. The topic is declared with `nms.kafka.partitions` (3); the listener runs `nms.kafka.concurrency` (3) threads. The consumer calls `DeliveryWorker.process(id)`: skip unless `PENDING` and due, then the same per-row path as a poll (checks, rate limit, claim, send, outcome) on the listener thread, alongside the poller; the claim lets one send. The poller's `PENDING` queries then skip EMAIL rows created within `nms.kafka.poller-grace` and never moved (`created_at <= now - grace or version > 0`; same index range, one extra condition), so a scheduled send or a postponed / rate-deferred row goes to the poller when due; retries, lease reclaim and SMS are unchanged. A failed publish is logged, counted, and never fails the request; the poller sends the row after the grace.
+
+```mermaid
+sequenceDiagram
+    participant I as Intake (request thread)
+    participant D as Database
+    participant K as Kafka
+    participant C as Consumer
+    participant W as Poller
+    I->>D: commit notifications + deliveries
+    I->>K: after commit: EMAIL delivery id (key = id)
+    K->>C: id
+    C->>D: load row; PENDING and due? then per-row path (claim on version, send, outcome)
+    W->>D: PENDING EMAIL only once created longer ago than poller-grace, or moved (missed publish)
+```
 
 Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 0.8s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`, or (`lease expired after expiresAt`) for a reclaimed one, which may have been sent.
 
@@ -561,9 +580,24 @@ nms:
       EMAIL: 600
       SMS: 60
     default-per-source: 30 # any channel not listed
+  kafka:                   # ADR-0008
+    enabled: false         # NMS_KAFKA_ENABLED; broker from SPRING_KAFKA_BOOTSTRAP_SERVERS
+    poller-grace: 30s      # with Kafka on, a new unmoved EMAIL row is left to Kafka this long after creation; positive
+    partitions: 3          # topic partitions when created here; positive
+    concurrency: 3         # consumer threads; positive
+spring:
+  kafka:                   # used only with nms.kafka.enabled=true
+    producer:
+      properties:
+        "[max.block.ms]": 1000     # a publish waits at most this for metadata, then fails
+    consumer:
+      group-id: nms-delivery
+      auto-offset-reset: earliest  # a new group starts at the oldest message; sent ids are skipped
 ```
 
-Rate limit limitations: counts are per instance and reset on restart (N instances allow N x limit); up to 2 x limit in a burst across a window boundary; a key's deferred backlog becomes due together at each window end and is re-swept by one update per window (spreading it over future windows is a follow-up). On PostgreSQL the `created_at` tiebreak needs `created_at` in `ix_delivery_poll` to keep the index-ordered scan (not done; H2 reads the same rows either way).
+Kafka fast path limitations: not a transactional outbox, so a lost publish (crash after commit, broker down, full publish queue, shutdown with queued publishes) waits for the grace window; the consumer works in topic order, not priority, so under consumer lag a CRITICAL / HIGH EMAIL waits behind earlier messages (worst case the poller takes it after the grace, by priority); a send scheduled less than one grace after submission goes out at creation + grace (poller), not at its due time; with the broker down the publish thread works one submission per `max.block.ms`; the poller still reads in-grace EMAIL rows (skipped by the extra condition); no ordering needed across messages.
+
+Rate limit limitations: counts are per instance and reset on restart (N instances allow N x limit); up to 2 x limit in a burst across a window boundary; a key's deferred backlog becomes due together at each window end and is re-swept by one update per window (spreading it over future windows is a follow-up).
 
 Startup fails if a provider in `nms.routing.providers` has no adapter bean, or one for another channel.
 
@@ -631,13 +665,14 @@ nms:
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health`: Spring Boot defaults (`db`, `diskSpace`, `ping`); the worker is not part of health |
-| Metrics | `nms.dedup.lookup` timer per dedup query; `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.delivery.deferred{channel,reason}` per due delivery moved without a claim (a set-based postpone adds the rows it moved) (`reason` = `rate_limited`; no source system tag, the DEBUG log has it); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
+| Metrics | `nms.dedup.lookup` timer per dedup query; `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.delivery.deferred{channel,reason}` per due delivery moved without a claim (a set-based postpone adds the rows it moved) (`reason` = `rate_limited`; no source system tag, the DEBUG log has it); `nms.kafka.published{outcome}` per EMAIL delivery id published after commit (`ok` or `failed`; Kafka on only); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
 - `nms.deliveries.due` above 0 with no increase in `nms.delivery.attempts`: the poller has stopped (the gauge keeps its last value).
 - Sustained `nms.delivery.deferred{reason="rate_limited"}`: a source is above its limit (find it in the worker's DEBUG log); raise `nms.rate-limit.per-source.<CHANNEL>` (restart) only if the volume is legitimate.
+- Kafka on: any `nms.kafka.published{outcome="failed"}`: the broker is unreachable or the publish queue is full; EMAIL still goes out via the poller, one grace later. Consumer lag (`kafka_consumer_fetch_manager_records_lag_max` from the client metrics Boot binds, or the broker's group lag for `nms-delivery`) growing past the grace: the poller is taking EMAIL first dispatch too; both paths are safe together (claim).
 - Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
 - Suppression ratio `nms.notifications.submitted{outcome="suppressed"} / sum(nms.notifications.submitted)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. Check the `SUPPRESSED` audit events (`duplicate of <id>`) of that source; if dedup is wrong, set `NMS_DEDUP_ENABLED=false` (no data change, takes effect on restart). A rising `nms.dedup.lookup` p99 means the lookup is reading more rows than it should (check the index plan). The after-commit log line `Submission <id> accepted: <n> notifications, <m> suppressed, for source system <s>` gives the per-submission split.
 
@@ -646,7 +681,7 @@ What to alert on:
 | Concern | Prototype | Production |
 |---|---|---|
 | Database | H2 | PostgreSQL; set `reWriteBatchedInserts=true` on the JDBC URL so Hibernate's insert batches become multi-row inserts |
-| Work claiming | Conditional update on `id`, `status`, and `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
+| Work claiming | Conditional update on `id`, `status`, and `version`; optional Kafka fast path for EMAIL first dispatch, poller as reconciliation (ADR-0008) | `SELECT ... FOR UPDATE SKIP LOCKED`; a transactional outbox if a lost publish must not wait the grace; retry topics if retries should leave the poller |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
 | Provider limits | Retry on 429; in-memory fixed window per source system and channel (ADR-0007) | Shared counter (Redis or a database row per key and window) across instances; token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |

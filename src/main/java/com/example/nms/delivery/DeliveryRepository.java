@@ -28,20 +28,43 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
   /**
    * Due rows of one status and priority, earliest first, then oldest first (FIFO among rows a
    * rate-limit postpone moved to the same instant). Equality on both leading columns of the {@code
-   * (status, priority, next_attempt_at)} index makes this a range scan that stops after {@code
-   * limit} rows; one query per status and per priority, merged by the worker. Ordering by priority
-   * inside one query would first walk every not-yet-due row of a better priority.
+   * (status, priority, next_attempt_at, created_at)} index makes this a range scan that stops after
+   * {@code limit} rows; one query per status and per priority, merged by the worker. Ordering by
+   * priority inside one query would first walk every not-yet-due row of a better priority. The
+   * ORDER BY names the constant {@code status} and {@code priority} too: H2 follows the index for
+   * the order only when it lists the index columns from the first (#51).
    */
   @Query(
       """
       select d from Delivery d
       where d.status = :status and d.priority = :priority and d.nextAttemptAt <= :now
-      order by d.nextAttemptAt, d.createdAt
+      order by d.status, d.priority, d.nextAttemptAt, d.createdAt
       """)
   List<Delivery> findDue(
       @Param("status") DeliveryStatus status,
       @Param("priority") Priority priority,
       @Param("now") Instant now,
+      Limit limit);
+
+  /**
+   * {@link #findDue} with the Kafka grace window (ADR-0008): a row of {@code channel} created after
+   * {@code cutoff} and never moved ({@code version 0}) is left out (the fast path has it). A row a
+   * postpone or rate-limit deferral moved has a higher version and is returned when due. Same index
+   * range and order; the extra condition is checked on rows the range reads.
+   */
+  @Query(
+      """
+      select d from Delivery d
+      where d.status = :status and d.priority = :priority and d.nextAttemptAt <= :now
+        and (d.channel <> :channel or d.createdAt <= :cutoff or d.version > 0)
+      order by d.status, d.priority, d.nextAttemptAt, d.createdAt
+      """)
+  List<Delivery> findDueOutsideGrace(
+      @Param("status") DeliveryStatus status,
+      @Param("priority") Priority priority,
+      @Param("now") Instant now,
+      @Param("channel") Channel channel,
+      @Param("cutoff") Instant cutoff,
       Limit limit);
 
   /**
