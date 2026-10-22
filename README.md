@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/radwara/nms/actions/workflows/ci.yml/badge.svg)](https://github.com/radwara/nms/actions/workflows/ci.yml)
 
-Prototype service that accepts notification requests from source systems, routes each recipient to channels (requested channels, preferences, severity policy), delivers asynchronously through simulated email and SMS providers with bounded retries, and tracks the final outcome through provider callbacks. Built as one Spring Boot app on H2 in three scenarios: greenfield, brownfield (event-level dedup), and an ambiguous requirement (CRITICAL vs opt-out); a second brownfield change added an outbound rate limit and an optional Kafka fast path for EMAIL. Feature and scenario work went issue -> PR -> CI -> independent review -> engineer merge. Each CI run's summary page shows test counts and line coverage.
+Prototype service that accepts notification requests from source systems, routes each recipient to channels (requested channels, preferences, severity policy), delivers asynchronously through simulated email and SMS providers with bounded retries, and tracks the final outcome through provider callbacks. Built as one Spring Boot app on H2 in three scenarios: greenfield, brownfield (event-level dedup), and an ambiguous requirement (CRITICAL vs opt-out); a second brownfield change added an outbound rate limit and an optional Kafka fast path for EMAIL. Feature and scenario work went issue -> branch -> independent AI review on the branch -> PR with the review record -> CI -> engineer review and merge. Each CI run's summary page shows test counts and line coverage.
 
 ## Quick start
 
@@ -10,7 +10,7 @@ Requires Java 21. No other installs.
 
 ```
 ./mvnw verify            # format check, build, unit + integration tests, coverage
-./mvnw spring-boot:run   # http://localhost:8080/actuator/health
+./mvnw spring-boot:run   # http://localhost:8080/actuator/health (SERVER_PORT to change)
 ```
 
 Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Outbound sends are rate limited per source system and channel (`nms.rate-limit.*`: EMAIL 600, SMS 60, other channels 30 per minute; ADR-0007). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
@@ -18,7 +18,8 @@ Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `
 Kafka mode (ADR-0008, off by default; needs a broker). Local broker: `brew install kafka`, `brew services start kafka`. Then:
 
 ```
-NMS_KAFKA_ENABLED=true SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 ./mvnw spring-boot:run
+NMS_KAFKA_ENABLED=true SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 ./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+DEMO_TIMEOUT=60 scripts/demo.sh   # after "partitions assigned" appears in the app log
 ```
 
 EMAIL first dispatch then goes through topic `nms.delivery.email` (created at startup); the poller sends anything Kafka missed after `nms.kafka.poller-grace` (30s). Tests use an in-JVM broker; no install needed.
@@ -103,7 +104,7 @@ One section per evaluation criterion in the assignment. Each bullet points to th
 
 ### AI-assisted engineering
 - Roles and loop: engineer, orchestrator, implementer, reviewers ([`docs/process.md`](docs/process.md) Roles, Per-issue loop); agent rules in [`AGENTS.md`](AGENTS.md).
-- Every PR has an AI-usage note (generated / changed / rejected) and a "Review record" comment, e.g. [#41](https://github.com/radwara/nms/pull/41), [#45](https://github.com/radwara/nms/pull/45).
+- Every feature and docs PR from #5 has an AI-usage note (generated / changed / rejected) and an independent review record (headed "Independent reviews" up to #27, "Review record" after; #3 predates the loop, #42 was a CI-evidence draft), e.g. [#41](https://github.com/radwara/nms/pull/41), [#45](https://github.com/radwara/nms/pull/45).
 - Brownfield 2 review records: [#49](https://github.com/radwara/nms/pull/49) (bug finder, performance check) and [#53](https://github.com/radwara/nms/pull/53) (bug finder, architecture review, performance check); bugs [#50](https://github.com/radwara/nms/issues/50) and [#51](https://github.com/radwara/nms/issues/51) came from measured performance reviews.
 - What AI got wrong and what the engineer changed: [AI usage](#ai-usage) below.
 
@@ -246,7 +247,7 @@ Summary across PRs; each PR's AI-usage note and review record has the details.
 - Approved AI proposals: idempotency check before time 422s, 409 / 4092 for a concurrent key ([#26](https://github.com/radwara/nms/pull/26#discussion_r4339680007)); kept both routing audit events ([#27](https://github.com/radwara/nms/pull/27#discussion_r4342566572)); rejected SHA pinning of actions ([#17](https://github.com/radwara/nms/pull/17)).
 - Ran the demo on the milestone PRs (#35, #41, #45) and recorded the result in the PR; ran the app with Kafka off and on for #53 (screenshots in the PR).
 
-**Generated by AI, from those decisions:** all production code and tests, CI workflow, Dockerfile, demo script, and drafts of every doc. The engineer scoped each issue, set its decisions, and approved and merged each PR; independent AI reviews in a fresh context checked every PR before merge. 163 review findings recorded on PRs #17-#53.
+**Generated by AI, from those decisions:** all production code and tests, CI workflow, Dockerfile, demo script, and drafts of every doc. The engineer scoped each issue, set its decisions, and approved and merged each PR; independent AI reviews in a fresh context checked every PR from #5 before merge. 163 review findings recorded on PRs #17-#53.
 
 **What AI got wrong** (all caught before merge):
 
@@ -281,7 +282,7 @@ Time spent: about 8 focused hours across several sessions. Commit and PR timesta
 
 Tools: Claude Code (Claude Opus) for orchestration, implementation and reviews; GitHub Actions for CI.
 
-How to tell who did what: all GitHub posts come from one account. PR sections and comments starting with `Engineer:` are the engineer's; comments headed `Review record` are AI review summaries posted by the orchestrator; bugs found by review are labelled `found-by:review` (also `found-by:test`, `found-by:engineer`). Roles: [`docs/process.md`](docs/process.md).
+How to tell who did what: all GitHub posts come from one account. PR sections and comments starting with `Engineer:` are the engineer's; comments headed `Review record` (or `Independent reviews`, PRs #17-#27) are AI review summaries posted by the orchestrator; "Engineer decisions" sections in issues (e.g. #46, #47) record the engineer's answers in discussion, written up by the orchestrator; bugs found by review are labelled `found-by:review` (also `found-by:test`, `found-by:engineer`). Roles: [`docs/process.md`](docs/process.md).
 
 ## Docs
 

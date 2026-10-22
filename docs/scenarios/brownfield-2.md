@@ -2,7 +2,7 @@
 
 - Issue: #46. Requirements: SC-2, FR-5.2 (rate-limit response, spec 4.5), NFR-4. Related: A-41, #47.
 - Baseline: `main` at `e43ed23` (#45 merged), treated as the existing system.
-- Status: implemented on `feat/46-rate-limit`; review fixes in section 9; Execution and Validation below.
+- Status: merged in #49 (`950dcfd`); review fixes in section 9; Execution and Validation below.
 
 ## 1. Context and gap
 
@@ -145,7 +145,7 @@ Demo (`scripts/demo.sh`, dev-profile jar on port 18080, fresh database): `Demo p
 
 - Issue: #47. Requirements: SC-2, NFR scalability. Revisits ADR-0004 (broker named as the production path).
 - Baseline: `main` at `950dcfd` (#46 merged), treated as the existing system.
-- Status: implemented on `feat/47-kafka-email`; Execution and Validation below.
+- Status: merged in #53 (`6a968be`); Execution and Validation below.
 
 ## 1. Context and gap
 
