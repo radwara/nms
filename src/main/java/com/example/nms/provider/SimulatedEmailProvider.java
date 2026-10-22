@@ -5,15 +5,16 @@ import java.util.Optional;
 import org.springframework.stereotype.Component;
 
 /**
- * {@code sim-email}: the send token is the address up to the first dot, {@code <send>.<cb>@...}.
+ * {@code sim-email}: addresses {@code <send>.<callback>@...}; the send token is the part up to the
+ * first dot, the callback token the rest up to {@code @}.
  */
 @Component
 public class SimulatedEmailProvider extends SimulatedProvider {
 
   public static final String NAME = "sim-email";
 
-  SimulatedEmailProvider() {
-    super(NAME, Channel.EMAIL, "em-");
+  SimulatedEmailProvider(SimulatedCallbacks callbacks) {
+    super(NAME, Channel.EMAIL, "em-", callbacks);
   }
 
   @Override
@@ -24,5 +25,15 @@ public class SimulatedEmailProvider extends SimulatedProvider {
       return Optional.empty();
     }
     return SimulatedSend.ofEmailToken(address.substring(0, dot));
+  }
+
+  @Override
+  Optional<SimulatedCallback> callbackFor(String address) {
+    int dot = address.indexOf('.');
+    int at = address.indexOf('@');
+    if (dot <= 0 || at < dot) {
+      return Optional.empty();
+    }
+    return SimulatedCallback.ofEmailToken(address.substring(dot + 1, at));
   }
 }

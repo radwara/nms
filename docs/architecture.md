@@ -33,7 +33,7 @@ flowchart LR
 | Routing | Resolve channels per recipient from request, preferences, and policy |
 | Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire |
 | Provider adapters | One per channel: send call, error classification, callback event mapping |
-| Webhook handler | Authenticate callback, dedupe, apply final status |
+| Webhook handler | Authenticate (token filter) and validate the callback, hand it to `DeliveryCallbacks` in `delivery`, which dedupes by state and applies the final status |
 | Status + audit | Read models; overall status derived on read |
 | Directory | Seeded recipients, contact addresses, channel preferences |
 
@@ -98,15 +98,22 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
   "eventId": "evt-778",
   "type": "FRAUD_ALERT",
   "severity": "CRITICAL",
+  "priority": "HIGH",
+  "requestedChannels": ["EMAIL"],
   "overallStatus": "PARTIALLY_DELIVERED",
   "duplicateSubmissions": 1,
   "createdAt": "...", "scheduledAt": null, "expiresAt": "...",
   "deliveries": [
-    { "channel": "EMAIL", "status": "DELIVERED", "attempts": 2, "sentAt": "...", "finalizedAt": "..." },
-    { "channel": "SMS", "status": "FAILED", "reason": "INVALID_RECIPIENT", "attempts": 1, "finalizedAt": "..." }
+    { "deliveryId": "d5e1...", "channel": "EMAIL", "status": "DELIVERED", "attempts": 2, "sentAt": "...", "finalizedAt": "..." },
+    { "deliveryId": "a07b...", "channel": "SMS", "status": "FAILED", "attempts": 1, "reason": "INVALID_RECIPIENT", "finalizedAt": "..." }
   ]
 }
 ```
+
+- One entry per routed channel (selected channels, FR-2.2), ordered by channel. `requestedChannels` is `null` when preferences were used; compare it with `deliveries` to see what routing changed (details in the audit).
+- `overallStatus` is derived on read (see Overall status). `duplicateSubmissions` counts the notification's `DUPLICATE_SUBMISSION` audit events.
+- Top-level timestamps are always present (`null` when unset); per-delivery `reason`, `sentAt`, `finalizedAt` appear once they apply. `deliveryId` is the id providers call back with.
+- Unknown id, malformed id, and another source system's id are the same 404 / 4041: the id is bound as a string and parsed strictly (canonical UUID, either case), and the lookup is `id and source_system`.
 
 ### Audit
 
@@ -123,6 +130,9 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 }
 ```
 
+- Ordered by `occurred_at, id`: events written in one transaction share a timestamp and keep insert order. Same tenant scoping and 404 as Status.
+- Codes only: no source system, content, or addresses. `channel` and `detail` are omitted when null.
+
 ### Provider callbacks
 
 One generic callback format for all simulated providers. We pass our `deliveryId` with every send (real vendors support this: SendGrid custom args, Twilio per-message callback URL), so callbacks match on our own id.
@@ -133,9 +143,14 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 { "deliveryId": "d-5e1...", "providerMessageId": "em-123", "event": "BOUNCED", "reasonCode": "MAILBOX_UNAVAILABLE", "occurredAt": "..." }
 ```
 
-- `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`.
-- Dedupe by state: only a `SENT` delivery changes. Repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`.
-- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged.
+- Required: `deliveryId` (UUID), `providerMessageId` (<= 128), `event`, `occurredAt` (ISO-8601 with offset). Optional `reasonCode`: <= 64 of `A-Z a-z 0-9 _ . -`, so it can be audited. Validation follows Errors (all at once, lenient binding); unknown properties are ignored. The provider is the one the token authenticated, never the body.
+- `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`; `FAILED` to reason `PROVIDER_FAILED` (A-49). The vendor's `reasonCode` goes to the audit detail (`BOUNCED, code MAILBOX_UNAVAILABLE`), not the delivery.
+- Dedupe by state: only a `SENDING`, `SENT`, or `RETRY_SCHEDULED` delivery of the same provider changes. `SENDING` covers a callback that beats our `SENT` write; `RETRY_SCHEDULED` covers a vendor that accepted an attempt we classified as failed (e.g. `TIMEOUT`): the callback applies and cancels the retry, since the write clears `next_attempt_at` and bumps `version`, so the pending retry's claim fails and nothing is sent again (A-47). Everything else is audited `CALLBACK_IGNORED` with the reason and event, e.g. `already DELIVERED; event FAILED`, `provider mismatch; event DELIVERED`, `while PENDING; event DELIVERED` (never sent), `late after expiry; event DELIVERED` (A-48).
+- `finalized_at` is our receive time; `occurredAt` is validated but not stored, so vendor clock skew cannot reorder history.
+- Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged at INFO, no audit (no source system to file it under), no counter.
+- `delivery.DeliveryCallbacks.apply` is the only callback writer: row lock, conditional update, audit, and (after commit) `nms.deliveries.outcome` in one transaction. The webhook controller only binds and validates.
+- The row is locked (`select ... for update`) before the clock is read, so a worker `SENT` write that commits first is always earlier: `finalized_at >= sent_at`, and the history reads `SENT`, then the callback's event.
+- `provider_message_id` is unique per provider. If the delivery has none and another delivery of that provider already holds the callback's id, the outcome still applies without the id, and the audit detail says `message id conflict` (still `200`).
 - Mapping real vendor payloads (event names, batching, signatures) is production work inside each provider adapter.
 
 ### Errors
@@ -244,6 +259,8 @@ The simulated providers derive the outcome from the address, so every path is re
 | `FAILED` | `failed` | `02` |
 | No callback (stays `SENT`) | `silent` | `09` |
 
+Any other callback token or code means no callback. `BOUNCED` carries `reasonCode` `MAILBOX_UNAVAILABLE`, `FAILED` carries `UNDELIVERABLE`. Posted by `SimulatedCallbacks` (see Callback).
+
 Seeded recipients:
 
 | Id | Email (@sim.test) | Phone | Shows |
@@ -301,9 +318,9 @@ No status column: overall status is derived from deliveries.
 | `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
 | `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
-| `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `RETRIES_EXHAUSTED` |
+| `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `PROVIDER_FAILED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
-| `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id` and `status in (SENDING, SENT)` only (final states never change). Every write increments `version` and sets `updated_at` |
+| `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)` only (final states never change). Every write increments `version` and sets `updated_at` |
 
 ### Audit
 
@@ -360,6 +377,10 @@ stateDiagram-v2
     RETRY_SCHEDULED --> EXPIRED: past expiresAt
     SENT --> DELIVERED: callback
     SENT --> FAILED: callback (incl. bounce)
+    SENDING --> DELIVERED: callback before our SENT write
+    SENDING --> FAILED: callback before our SENT write
+    RETRY_SCHEDULED --> DELIVERED: callback, retry cancelled
+    RETRY_SCHEDULED --> FAILED: callback, retry cancelled
 ```
 
 - `SENT` with no callback stays `SENT` indefinitely. That is the honest state.
@@ -384,18 +405,20 @@ Retries: max 3 attempts (configurable), exponential backoff with equal jitter: `
 
 ### Overall status (derived on read)
 
+First matching row wins (`status.OverallStatus.derive`, unit-tested per row):
+
 | Deliveries | `overallStatus` |
 |---|---|
-| Before `scheduledAt` | `SCHEDULED` |
+| No deliveries | `NOT_ROUTED` (also before `scheduledAt`: nothing will be sent) |
+| Before `scheduledAt`, all `PENDING` | `SCHEDULED` |
 | Any `PENDING`, `SENDING`, `RETRY_SCHEDULED` | `IN_PROGRESS` |
 | Otherwise any `SENT` | `AWAITING_CONFIRMATION` |
 | All `DELIVERED` | `DELIVERED` |
 | Some `DELIVERED`, rest failed or expired | `PARTIALLY_DELIVERED` |
 | None delivered, all `EXPIRED` | `EXPIRED` |
 | None delivered, otherwise | `FAILED` |
-| No deliveries | `NOT_ROUTED` |
 
-"Delivered" means every routed channel was delivered, not "recipient reached on some channel" (A-22).
+"Delivered" means every routed channel was delivered, not "recipient reached on some channel" (A-22). `NOT_ROUTED` is checked first (A-24).
 
 ## Control flow
 
@@ -464,7 +487,7 @@ sequenceDiagram
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
-- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
+- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 - The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
@@ -502,19 +525,42 @@ sequenceDiagram
     participant H as Webhook handler
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
-    H->>H: authenticate, validate
-    H->>D: update delivery (final status, providerMessageId, version + 1) where id = deliveryId and status in (SENDING, SENT)
-    alt one row updated
-        H->>D: audit DELIVERED or FAILED
-    else delivery already final
-        H->>D: audit CALLBACK_IGNORED
-    else unknown deliveryId
-        H->>H: log
+    H->>H: authenticate (filter), validate body
+    H->>D: DeliveryCallbacks.apply (one transaction, row locked first)
+    alt unknown deliveryId
+        D-->>H: UNKNOWN (logged)
+    else provider differs from the token's
+        D->>D: audit CALLBACK_IGNORED (provider mismatch)
+    else
+        D->>D: update: final status, reason, finalized_at = now, sent_at = coalesce(sent_at, now), provider_message_id = coalesce(..), version + 1 where id, provider, status in (SENDING, SENT, RETRY_SCHEDULED)
+        alt one row updated
+            D->>D: audit DELIVERED or FAILED, outcome metric after commit
+        else final, expired, or PENDING (never sent)
+            D->>D: audit CALLBACK_IGNORED (why and event)
+        end
     end
     H-->>V: 200
 ```
 
-The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status. The worker's later `SENT` write is conditional on `status = SENDING` and the claim's `version`, so it updates nothing and the final state stands.
+The delivery row is committed as `SENDING` before the send call, so even a callback that beats our `SENT` write finds it and applies the final status, with `sent_at` = the callback's receive time. The worker's later `SENT` write is conditional on `status = SENDING` and the claim's `version`, so it updates nothing and writes no audit: that history reads `QUEUED`, `DELIVERED` with no `SENT` event (tested in `DeliveryCallbacksIT`).
+
+A delivery that expired after a lease reclaim (`lease expired after expiresAt`) may have been sent. A late callback for it is not applied: final states never change, and `EXPIRED` is what the worker decided. It is audited `CALLBACK_IGNORED` with `late after expiry; event <event>`, so the vendor's outcome stays visible in the history (A-48).
+
+#### Simulated callbacks
+
+`provider.SimulatedCallbacks` plays the vendor side: on a message's first acceptance (a deduped resend schedules nothing) it posts the callback the address asks for (Simulated outcomes) to `POST /api/v1/webhooks/{provider}` with the provider's token, after `delay`, over real HTTP. Own single-thread scheduler, so it works with the worker off; one attempt, no retry; failures logged by HTTP status or exception type.
+
+```yaml
+nms:
+  simulator:
+    callbacks:
+      enabled: false       # NMS_SIMULATOR_CALLBACKS_ENABLED; true in the dev profile; tests drive callbacks directly
+      delay: 1s
+      base-url: ""         # blank: this server, http://localhost:<port>
+      tokens:              # plaintext demo tokens (ADR-0001), dev profile and tests only; startup fails if enabled without both
+        sim-email: sim-email-dev-only
+        sim-sms: sim-sms-dev-only
+```
 
 ## Security
 
@@ -525,7 +571,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
 - Input limits: JSON bodies max 64 KB (413 / 4130, enforced while parsing, so chunked bodies are bounded too), max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
-- Secrets come from environment variables; nothing secret is committed.
+- Secrets come from environment variables; nothing secret is committed. The plaintext tokens of the simulated callbacks are the documented demo tokens (dev profile and tests only).
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
 - Actuator is outside API-key auth: `health` and, in the prototype, `prometheus` need no key. In production actuator is served on an internal management port.
 
@@ -536,7 +582,7 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health` (database only; the worker is not part of health) |
-| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `FAILED`, or `EXPIRED`; `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
+| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.

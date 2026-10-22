@@ -2,6 +2,7 @@ package com.example.nms.provider;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.nms.common.CallbackEvent;
 import com.example.nms.provider.SendResult.Accepted;
 import com.example.nms.provider.SendResult.Failed;
 import java.time.Duration;
@@ -11,11 +12,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-/** #10: the simulated providers follow the address convention and dedupe on deliveryId. */
+/**
+ * #10, #11: the simulated providers follow the address convention, dedupe on deliveryId, and ask
+ * for a callback on first acceptance only.
+ */
 class SimulatedProviderTest {
 
-  private final SimulatedEmailProvider email = new SimulatedEmailProvider();
-  private final SimulatedSmsProvider sms = new SimulatedSmsProvider();
+  private final RecordingCallbacks callbacks = new RecordingCallbacks();
+  private final SimulatedEmailProvider email = new SimulatedEmailProvider(callbacks);
+  private final SimulatedSmsProvider sms = new SimulatedSmsProvider(callbacks);
 
   @ParameterizedTest
   @CsvSource({
@@ -83,6 +88,53 @@ class SimulatedProviderTest {
     assertThat(email.send(request)).isInstanceOf(Accepted.class);
     assertThat(email.send(request)).isInstanceOf(Accepted.class);
     assertThat(sms.send(other)).isEqualTo(new Failed(ErrorCategory.TRANSIENT, "503"));
+  }
+
+  @ParameterizedTest
+  @CsvSource(
+      nullValues = "none",
+      value = {
+        "ok.delivered@sim.test, DELIVERED",
+        "ok.bounce@sim.test, BOUNCED",
+        "ok.failed@sim.test, FAILED",
+        "ok.silent@sim.test, none",
+        "ok.nosuchtoken@sim.test, none",
+        "flaky2.delivered@sim.test, DELIVERED",
+        "+15550100000, DELIVERED",
+        "+15550100002, FAILED",
+        "+15550100009, none",
+        "+15550100001, none",
+        "+15550101200, DELIVERED"
+      })
+  void callbackTokenOrCodeSelectsTheCallbackOnFirstAcceptance(String address, CallbackEvent event) {
+    SimulatedProvider provider = address.startsWith("+") ? sms : email;
+    SendRequest request = request(address);
+
+    SendResult result = provider.send(request);
+    while (result instanceof Failed) {
+      result = provider.send(request); // flaky2
+    }
+
+    assertThat(callbacks.calls)
+        .containsExactly(
+            new RecordingCallbacks.Call(
+                provider.name(),
+                request.deliveryId(),
+                ((Accepted) result).providerMessageId(),
+                Optional.ofNullable(event)));
+  }
+
+  @Test
+  void dedupedResendAndFailedSendsAskForNoCallback() {
+    SendRequest request = request("ok.delivered@sim.test");
+
+    email.send(request);
+    email.send(request);
+    email.send(request("reject.delivered@sim.test"));
+    sms.send(request("+15550100500"));
+
+    assertThat(callbacks.calls).hasSize(1);
+    assertThat(callbacks.calls.getFirst().deliveryId()).isEqualTo(request.deliveryId());
   }
 
   @Test

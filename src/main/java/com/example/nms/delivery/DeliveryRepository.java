@@ -2,11 +2,14 @@ package com.example.nms.delivery;
 
 import com.example.nms.common.DeliveryStatus;
 import com.example.nms.common.Priority;
+import jakarta.persistence.LockModeType;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -14,9 +17,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * The delivery queue (ADR-0004). Every worker write is a conditional update on {@code id}, the
- * expected {@code status}, and the expected {@code version}; it increments {@code version} and sets
- * {@code updated_at}. Zero rows updated means another writer won. Called outside a transaction,
- * each write commits on return.
+ * expected {@code status}, and the expected {@code version}; a callback write is conditional on
+ * {@code id}, {@code provider}, and {@code status in (SENDING, SENT, RETRY_SCHEDULED)}. Every write
+ * increments {@code version} and sets {@code updated_at}. Zero rows updated means another writer
+ * won. Called outside a transaction, each write commits on return.
  */
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
 
@@ -37,6 +41,21 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("priority") Priority priority,
       @Param("now") Instant now,
       Limit limit);
+
+  /**
+   * The row, locked until the caller's transaction ends ({@code select ... for update}): a callback
+   * reads the clock only after any concurrent worker write has committed.
+   */
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
+  @Query("select d from Delivery d where d.id = :id")
+  Optional<Delivery> findForUpdate(@Param("id") UUID id);
+
+  /** Whether another delivery of {@code provider} already has this vendor message id (unique). */
+  boolean existsByProviderAndProviderMessageIdAndIdNot(
+      String provider, String providerMessageId, UUID id);
+
+  /** A notification's deliveries, one per channel. */
+  List<Delivery> findByNotificationIdOrderByChannel(UUID notificationId);
 
   /** {@code SENDING} rows whose lease started before {@code claimedBefore} (crashed mid-send). */
   @Query(
@@ -114,6 +133,35 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("version") long version,
       @Param("status") DeliveryStatus status,
       @Param("reason") String reason,
+      @Param("now") Instant now);
+
+  /**
+   * A provider callback's final state ({@code DELIVERED} or {@code FAILED}). Not conditional on the
+   * version, so it also applies while the worker still holds the claim; the worker's {@code SENT}
+   * write then changes nothing. On a {@code RETRY_SCHEDULED} row it clears {@code next_attempt_at}
+   * and bumps the version, so the pending retry is never claimed. {@code sent_at} and {@code
+   * provider_message_id} are kept if set.
+   */
+  @Transactional
+  @Modifying(clearAutomatically = true, flushAutomatically = true)
+  @Query(
+      """
+      update Delivery d
+      set d.status = :status, d.failureReason = :reason, d.finalizedAt = :now,
+          d.sentAt = coalesce(d.sentAt, :now),
+          d.providerMessageId = coalesce(d.providerMessageId, :providerMessageId),
+          d.nextAttemptAt = null, d.version = d.version + 1, d.updatedAt = :now
+      where d.id = :id and d.provider = :provider
+        and d.status in (com.example.nms.common.DeliveryStatus.SENDING,
+                         com.example.nms.common.DeliveryStatus.SENT,
+                         com.example.nms.common.DeliveryStatus.RETRY_SCHEDULED)
+      """)
+  int applyCallback(
+      @Param("id") UUID id,
+      @Param("provider") String provider,
+      @Param("status") DeliveryStatus status,
+      @Param("reason") String reason,
+      @Param("providerMessageId") String providerMessageId,
       @Param("now") Instant now);
 
   /** Moves a row's due time without claiming it, e.g. after an unexpected error. */
