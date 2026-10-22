@@ -104,6 +104,7 @@ One section per evaluation criterion in the assignment. Each bullet points to th
 ### AI-assisted engineering
 - Roles and loop: engineer, orchestrator, implementer, reviewers ([`docs/process.md`](docs/process.md) Roles, Per-issue loop); agent rules in [`AGENTS.md`](AGENTS.md).
 - Every PR has an AI-usage note (generated / changed / rejected) and a "Review record" comment, e.g. [#41](https://github.com/radwara/nms/pull/41), [#45](https://github.com/radwara/nms/pull/45).
+- Brownfield 2 review records: [#49](https://github.com/radwara/nms/pull/49) (bug finder, performance check) and [#53](https://github.com/radwara/nms/pull/53) (bug finder, architecture review, performance check); bugs [#50](https://github.com/radwara/nms/issues/50) and [#51](https://github.com/radwara/nms/issues/51) came from measured performance reviews.
 - What AI got wrong and what the engineer changed: [AI usage](#ai-usage) below.
 
 ### Architecture and system design
@@ -115,6 +116,7 @@ One section per evaluation criterion in the assignment. Each bullet points to th
 - Backlog of issues with acceptance criteria linked to requirement IDs; build order reviewed and changed before code ([backlog review](https://github.com/radwara/nms/issues/6#issuecomment-6308373952)).
 - One branch and PR per issue, per-PR commits and reviewers: [`greenfield.md`](docs/scenarios/greenfield.md) Execution.
 - Brownfield: behaviour-preserving refactor commit `3d9a72c` first, zero test diff, CI green on it alone ([`brownfield.md`](docs/scenarios/brownfield.md) Execution).
+- Brownfield 2: per PR, the analysis in [`brownfield-2.md`](docs/scenarios/brownfield-2.md) first (`b12d368`, `2594582`), then a zero-test-diff seam (`d1d240e` rate limiter allow-all, `64889ef` dispatch seam and process by id), then the feature (`brownfield-2.md` Execution sections).
 
 ### Realism and quality of outputs
 - Two-phase delivery that matches real vendors: `SENT` on vendor 200, final status by callback ([ADR-0003](docs/adr/0003-two-phase-delivery-status.md)).
@@ -125,24 +127,27 @@ One section per evaluation criterion in the assignment. Each bullet points to th
 ### Validation and risk management
 - Traceability matrix: every requirement mapped to tests in [`docs/requirements.md`](docs/requirements.md); untestable rows say why.
 - `GreenfieldE2EIT`: every flow over HTTP with the real poller and callbacks, plus a leak check of all audit rows and logs.
-- 10 bugs filed and fixed before merge, 9 `found-by:review`, 1 `found-by:test` ([list](https://github.com/radwara/nms/issues?q=label%3Abug)).
+- 12 bugs filed and fixed before merge, 11 `found-by:review`, 1 `found-by:test` ([list](https://github.com/radwara/nms/issues?q=label%3Abug)).
 - Brownfield regression risk and rollout ([`brownfield.md`](docs/scenarios/brownfield.md) sections 5, 7); off switch `NMS_DEDUP_ENABLED`.
+- Brownfield 2: `RateLimitFloodIT` (other source sent within 2 polls of each window, one set-based postpone per window, FIFO, statement counts); `KafkaEmailDispatchIT` (consumer stopped: the poller leaves the row `PENDING`; started: `SENT` inside the grace; same id twice sends once). Blockers measured by review and fixed: flood re-deferral (about 4,400 updates per window -> 1), submit with the broker down (3,315 ms -> 164 ms, no connection held), poll scan (5,001 -> 20 rows, #51). Kafka off by default.
 
 ### Clear, defensible decisions
 - Every assumption with its status: [`docs/ambiguity-log.md`](docs/ambiguity-log.md); engineer decisions marked, with the issue or PR.
 - Ambiguous requirement: options, stakeholder questions, decision, limitations ([`docs/scenarios/ambiguous.md`](docs/scenarios/ambiguous.md), PR [#43](https://github.com/radwara/nms/pull/43)).
 - Engineer decision tables: [`greenfield.md`](docs/scenarios/greenfield.md) section 4, [`brownfield.md`](docs/scenarios/brownfield.md) Engineer decisions.
+- Brownfield 2: engineer decisions in issues [#46](https://github.com/radwara/nms/issues/46) and [#47](https://github.com/radwara/nms/issues/47) and [`brownfield-2.md`](docs/scenarios/brownfield-2.md) section 2 of each part; review-time decisions (grace from creation, CRITICAL under consumer lag documented) in [#53](https://github.com/radwara/nms/pull/53)'s review record.
 
 ### Core principles
 - Modular, testable: one module packaged by feature, rules enforced by `PackageDependencyTest` ([ADR-0005](docs/adr/0005-technology-stack.md)); unit tests without a Spring context.
 - Reliable: claim committed before send, versioned conditional writes, lease reclaim, bounded retries ([ADR-0004](docs/adr/0004-database-backed-delivery-queue.md); `DeliveryQueueIT`, `DeliveryWorkerIT`).
-- Secure: [Security](#security) below. Scalable: path documented, not built (architecture.md "Scaling path").
-- Safe change: issue -> PR -> CI -> review for every change ([`docs/process.md`](docs/process.md)); additive V3 migration and an off switch for the brownfield feature.
+- Secure: [Security](#security) below. Scalable: Kafka partitions and consumer threads for EMAIL (ADR-0008); multi-instance path documented, not built (architecture.md "Scaling path").
+- Safe change: issue -> PR -> CI -> review for every change ([`docs/process.md`](docs/process.md)); additive V3 / V4 migrations; dedup off switch; Kafka off by default.
 
 ### Engineering judgment
 - Kept simple on purpose: plain filter over Spring Security, no key tooling (ADR-0001 revision); shared webhook token over HMAC, no callback-event table (ADR-0003).
 - Exactly-once rejected as unachievable: at-least-once with the `deliveryId` as provider idempotency key (A-37).
 - Dedup race documented instead of locked: fails open (one extra message), never drops a different message (ADR-0006, `EventDedupRaceIT`).
+- Kafka without an outbox: the poller already guarantees delivery, so a lost publish costs one grace, not a message (ADR-0008); fixed window over token bucket or shared counters at one instance (ADR-0007).
 
 ## Testing approach
 
@@ -229,7 +234,19 @@ Details: [architecture.md "Security"](docs/architecture.md#security).
 
 Summary across PRs; each PR's AI-usage note and review record has the details.
 
-**Generated by AI:** all production code and tests, CI workflow, Dockerfile, demo script, and drafts of every doc (from the engineer's inputs and decisions). Implementation by an implementer subagent from an orchestrator brief; reviews by fresh-context reviewer subagents. 147 review findings recorded on PRs #17-#45.
+**Engineer decided, changed, or rejected:**
+- Design ([#5](https://github.com/radwara/nms/pull/5), ADR-0002, ADR-0003): one notification per recipient, internal `submissionId`, per-recipient `channels`, required `Idempotency-Key`, two-phase status, shared webhook token instead of HMAC; commissioned the over-complication review that simplified ADR-0001 and ADR-0003.
+- ADR-0001 ([#3](https://github.com/radwara/nms/pull/3)): production path names HMAC and JWT (draft: OAuth2 only).
+- Retry policy ([#32](https://github.com/radwara/nms/pull/32#discussion_r4343946188)): 3 attempts, 500 ms base, equal jitter, `Retry-After` cap 60 s, no default TTL (draft: 4 attempts, 2 s, cap 1 h).
+- State model ([#34](https://github.com/radwara/nms/pull/34#discussion_r4344290584)): A-24, A-47 (changed: callbacks apply to `RETRY_SCHEDULED`), A-48, A-49.
+- Dedup key with content hash; shadow mode and severity rule rejected ([#31](https://github.com/radwara/nms/pull/31#discussion_r4344120633)); D3 option B ([#41](https://github.com/radwara/nms/pull/41#discussion_r4350865614)).
+- CRITICAL overrides opt-out on every channel, fixed rule, config switch rejected ([#43](https://github.com/radwara/nms/pull/43), [#45](https://github.com/radwara/nms/pull/45)); approved the one unplanned test change (`SubmitNotificationIT`, 4 -> 5 deliveries).
+- Rate limit ([#46](https://github.com/radwara/nms/issues/46)): fixed window in memory, key source system + channel, no CRITICAL bypass, defaults EMAIL 600 / SMS 60 / others 30 with an explicit fallback instead of half the limit; approved the one `DeliveryPollerIT` config change ([#49](https://github.com/radwara/nms/pull/49)).
+- Kafka fast path ([#47](https://github.com/radwara/nms/issues/47)): fast path plus poller reconciliation, full outbox and design-note-only rejected; EMAIL only, off by default. On review ([#53](https://github.com/radwara/nms/pull/53)): grace from creation or moved rows, CRITICAL under consumer lag documented not fixed, separate grace query and one publish per submission kept, #51 fixed in the same PR.
+- Approved AI proposals: idempotency check before time 422s, 409 / 4092 for a concurrent key ([#26](https://github.com/radwara/nms/pull/26#discussion_r4339680007)); kept both routing audit events ([#27](https://github.com/radwara/nms/pull/27#discussion_r4342566572)); rejected SHA pinning of actions ([#17](https://github.com/radwara/nms/pull/17)).
+- Ran the demo on the milestone PRs (#35, #41, #45) and recorded the result in the PR; ran the app with Kafka off and on for #53 (screenshots in the PR).
+
+**Generated by AI, from those decisions:** all production code and tests, CI workflow, Dockerfile, demo script, and drafts of every doc. The engineer scoped each issue, set its decisions, and approved and merged each PR; independent AI reviews in a fresh context checked every PR before merge. 163 review findings recorded on PRs #17-#53.
 
 **What AI got wrong** (all caught before merge):
 
@@ -242,20 +259,14 @@ Summary across PRs; each PR's AI-usage note and review record has the details.
 | [#39](https://github.com/radwara/nms/issues/39), [#40](https://github.com/radwara/nms/issues/40) | Callback timestamp before `SENT`; duplicate vendor message id -> 500 | Review |
 | [#33](https://github.com/radwara/nms/issues/33) | Log-format test depended on test order | CI (Linux) |
 | [#44](https://github.com/radwara/nms/issues/44) | Dedup blocked a corrected resend of a never-sent notification for 24h | Review |
+| [#50](https://github.com/radwara/nms/issues/50) | Rate limit: a throttled source still delayed other sources in a flood (one update per deferred row) | Review (measured) |
+| [#51](https://github.com/radwara/nms/issues/51) | Poll index missed the new `created_at` tiebreak; each poll read the whole due range | Review (measured) |
+| PR [#49](https://github.com/radwara/nms/pull/49) | Java rate-limit defaults differed from `application.yml` | Review, implementer |
+| PR [#53](https://github.com/radwara/nms/pull/53) | Kafka publish held a DB connection while blocked on a down broker (pool exhaustion); grace held rows Kafka could never send; main IT did not prove the consumer sent the row | Review |
 | PR [#5](https://github.com/radwara/nms/pull/5) | Design draft: vendor 200 = delivered; status example contradicting A-21; request did not tie users to channels | Engineer |
 | PR [#31](https://github.com/radwara/nms/pull/31) | Proposed `eventId` dedup key would drop a second alert reusing a correlation id | Review, engineer |
 | PR [#41](https://github.com/radwara/nms/pull/41) | Race and metrics tests used stub routing (would pass without routing) | Implementer |
 | PR [#17](https://github.com/radwara/nms/pull/17) | Formatter version broken on JDK 21; Boot 4 metrics module missing | Build |
-
-**Engineer decided, changed, or rejected:**
-- Design ([#5](https://github.com/radwara/nms/pull/5), ADR-0002, ADR-0003): one notification per recipient, internal `submissionId`, per-recipient `channels`, required `Idempotency-Key`, two-phase status, shared webhook token instead of HMAC; commissioned the over-complication review that simplified ADR-0001 and ADR-0003.
-- ADR-0001 ([#3](https://github.com/radwara/nms/pull/3)): production path names HMAC and JWT (draft: OAuth2 only).
-- Retry policy ([#32](https://github.com/radwara/nms/pull/32#discussion_r4343946188)): 3 attempts, 500 ms base, equal jitter, `Retry-After` cap 60 s, no default TTL (draft: 4 attempts, 2 s, cap 1 h).
-- State model ([#34](https://github.com/radwara/nms/pull/34#discussion_r4344290584)): A-24, A-47 (changed: callbacks apply to `RETRY_SCHEDULED`), A-48, A-49.
-- Dedup key with content hash; shadow mode and severity rule rejected ([#31](https://github.com/radwara/nms/pull/31#discussion_r4344120633)); D3 option B ([#41](https://github.com/radwara/nms/pull/41#discussion_r4350865614)).
-- CRITICAL overrides opt-out on every channel, fixed rule, config switch rejected ([#43](https://github.com/radwara/nms/pull/43), [#45](https://github.com/radwara/nms/pull/45)); approved the one unplanned test change (`SubmitNotificationIT`, 4 -> 5 deliveries).
-- Approved AI proposals: idempotency check before time 422s, 409 / 4092 for a concurrent key ([#26](https://github.com/radwara/nms/pull/26#discussion_r4339680007)); kept both routing audit events ([#27](https://github.com/radwara/nms/pull/27#discussion_r4342566572)); rejected SHA pinning of actions ([#17](https://github.com/radwara/nms/pull/17)).
-- Ran the demo on the milestone PRs (#35, #41, #45) and recorded the result in the PR.
 
 ## How this was built
 
