@@ -13,7 +13,10 @@ import org.junit.jupiter.api.Test;
 class ProviderRegistryTest {
 
   private final ProviderRegistry registry =
-      new ProviderRegistry(List.of(new SimulatedEmailProvider(), new SimulatedSmsProvider()));
+      new ProviderRegistry(
+          List.of(
+              new SimulatedEmailProvider(new RecordingCallbacks()),
+              new SimulatedSmsProvider(new RecordingCallbacks())));
 
   @Test
   void findsAdaptersByName() {
@@ -48,7 +51,9 @@ class ProviderRegistryTest {
     assertThatThrownBy(
             () ->
                 new ProviderRegistry(
-                    List.of(new SimulatedEmailProvider(), new SimulatedEmailProvider())))
+                    List.of(
+                        new SimulatedEmailProvider(new RecordingCallbacks()),
+                        new SimulatedEmailProvider(new RecordingCallbacks()))))
         .isInstanceOf(IllegalStateException.class)
         .hasMessageContaining("sim-email");
   }

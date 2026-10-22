@@ -14,13 +14,19 @@ public class SimulatedSmsProvider extends SimulatedProvider {
 
   private static final Pattern NUMBER = Pattern.compile("\\+1555010(\\d{2})(\\d{2})");
 
-  SimulatedSmsProvider() {
-    super(NAME, Channel.SMS, "sm-");
+  SimulatedSmsProvider(SimulatedCallbacks callbacks) {
+    super(NAME, Channel.SMS, "sm-", callbacks);
   }
 
   @Override
   Optional<SimulatedSend> outcomeFor(String address) {
     Matcher matcher = NUMBER.matcher(address);
     return matcher.matches() ? SimulatedSend.ofSmsCode(matcher.group(1)) : Optional.empty();
+  }
+
+  @Override
+  Optional<SimulatedCallback> callbackFor(String address) {
+    Matcher matcher = NUMBER.matcher(address);
+    return matcher.matches() ? SimulatedCallback.ofSmsCode(matcher.group(2)) : Optional.empty();
   }
 }

@@ -13,7 +13,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * A simulated vendor: answers synchronously from the address convention, with no network or
  * sleeping ({@code TIMEOUT} is returned as a result). Dedupes on {@code deliveryId} like a real
  * vendor honouring an idempotency key: a resend after acceptance returns the same message id and is
- * not a new message. State is in memory and lost on restart, which a real vendor's is not.
+ * not a new message. After the first acceptance, {@link SimulatedCallbacks} reports the outcome the
+ * address asks for. State is in memory and lost on restart, which a real vendor's is not.
  */
 public abstract class SimulatedProvider implements ChannelProvider {
 
@@ -29,11 +30,14 @@ public abstract class SimulatedProvider implements ChannelProvider {
   private final Map<UUID, String> accepted = new ConcurrentHashMap<>();
   private final Map<UUID, Integer> flakyFailures = new ConcurrentHashMap<>();
   private final AtomicLong sendCalls = new AtomicLong();
+  private final SimulatedCallbacks callbacks;
 
-  SimulatedProvider(String name, Channel channel, String messageIdPrefix) {
+  SimulatedProvider(
+      String name, Channel channel, String messageIdPrefix, SimulatedCallbacks callbacks) {
     this.name = name;
     this.channel = channel;
     this.messageIdPrefix = messageIdPrefix;
+    this.callbacks = callbacks;
   }
 
   @Override
@@ -60,9 +64,9 @@ public abstract class SimulatedProvider implements ChannelProvider {
     SimulatedSend send = outcome.get();
     if (send == SimulatedSend.FLAKY2
         && flakyFailures.merge(request.deliveryId(), 1, Integer::sum) > FLAKY_FAILURES) {
-      return accept(request.deliveryId());
+      return accept(request);
     }
-    return send == SimulatedSend.OK ? accept(request.deliveryId()) : send.failure();
+    return send == SimulatedSend.OK ? accept(request) : send.failure();
   }
 
   /** Distinct messages accepted; a deduped resend does not count. */
@@ -78,8 +82,17 @@ public abstract class SimulatedProvider implements ChannelProvider {
   /** The send outcome encoded in {@code address}; empty if it does not follow the convention. */
   abstract Optional<SimulatedSend> outcomeFor(String address);
 
-  private Accepted accept(UUID deliveryId) {
-    return new Accepted(
-        accepted.computeIfAbsent(deliveryId, id -> messageIdPrefix + UUID.randomUUID()));
+  /** The callback encoded in {@code address}; empty if none (no callback is sent). */
+  abstract Optional<SimulatedCallback> callbackFor(String address);
+
+  /** Only the first acceptance of a delivery is a new message, and only it gets a callback. */
+  private Accepted accept(SendRequest request) {
+    String messageId = messageIdPrefix + UUID.randomUUID();
+    String existing = accepted.putIfAbsent(request.deliveryId(), messageId);
+    if (existing != null) {
+      return new Accepted(existing);
+    }
+    callbacks.accepted(name, request.deliveryId(), messageId, callbackFor(request.address()));
+    return new Accepted(messageId);
   }
 }

@@ -61,6 +61,14 @@ nms:
     max-attempts: 3
     # Retry n waits base * 2^(n-1) / 2 plus random up to the same again (equal jitter).
     backoff-base: 500ms
+  simulator:
+    callbacks:
+      # Simulated vendors post the outcome to our webhook after accepting a send (ADR-0003).
+      # Dev and demo only: tokens are the plaintext demo tokens, configured in application-dev.yml.
+      enabled: ${NMS_SIMULATOR_CALLBACKS_ENABLED:false}
+      delay: 1s
+      # Blank: this server (http://localhost:<port>).
+      base-url: ""
   security:
     # keyId:sourceSystem:sha256hex[,...] (ADR-0001). Empty: every /api request is rejected with 401.
     api-keys: ${NMS_API_KEYS:}
