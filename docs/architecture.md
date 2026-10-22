@@ -115,8 +115,8 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
   "events": [
     { "at": "...", "type": "ACCEPTED" },
     { "at": "...", "type": "ROUTED", "channel": "SMS", "detail": "added: severity CRITICAL" },
-    { "at": "...", "type": "ATTEMPT_FAILED", "channel": "EMAIL", "detail": "TRANSIENT, attempt 1" },
-    { "at": "...", "type": "RETRY_SCHEDULED", "channel": "EMAIL", "detail": "in 2s" },
+    { "at": "...", "type": "ATTEMPT_FAILED", "channel": "EMAIL", "detail": "attempt 1, TRANSIENT, code 503" },
+    { "at": "...", "type": "RETRY_SCHEDULED", "channel": "EMAIL", "detail": "in 0.4s" },
     { "at": "...", "type": "DUPLICATE_SUBMISSION", "detail": "same Idempotency-Key; original returned" },
     { "at": "...", "type": "DELIVERED", "channel": "EMAIL" }
   ]
@@ -233,6 +233,10 @@ The simulated providers derive the outcome from the address, so every path is re
 | `AUTH_ERROR` | `autherror` | `06` | `FAILED` |
 | Fail twice, then accept | `flaky2` | `12` | Two `TRANSIENT` failures, then `SENT` |
 
+- Provider codes are HTTP-style: `503` transient, `504` timeout, `429` rate limited (always with `Retry-After: 5s`), `422` rejected, `400` invalid recipient, `401` auth error.
+- An address outside the convention is `INVALID_RECIPIENT` (`400`): the simulated vendor does not know it.
+- Each provider dedupes on `deliveryId` in memory: a resend after acceptance returns the same message id and is not a new message. `flaky2` counts failures per `deliveryId`. The send is synchronous; `TIMEOUT` is a returned result, not a wait.
+
 | Callback (after `SENT`) | Email token | SMS `CC` |
 |---|---|---|
 | `DELIVERED` | `delivered` | `00` |
@@ -293,7 +297,7 @@ No status column: overall status is derived from deliveries.
 | `status` | varchar(20) | `PENDING`, `SENDING`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED` |
 | `priority` | smallint | Copied from the notification (HIGH=0, NORMAL=1, LOW=2) so the poll sorts correctly without a join |
 | `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION` |
-| `attempt_count` | int | |
+| `attempt_count` | int | Send attempts started; incremented by the claim, so an attempt lost to a crash counts |
 | `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
 | `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
@@ -374,7 +378,9 @@ stateDiagram-v2
 | `INVALID_RECIPIENT` | Bad address or number | `FAILED` |
 | `AUTH_ERROR` | Vendor rejects our credentials | `FAILED`, error log, metric (config problem, not delivery problem) |
 
-Retries: max 4 attempts (configurable), exponential backoff with full jitter. If the next attempt would fall after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`.
+Retries: max 3 attempts (configurable), exponential backoff with equal jitter: `cap/2 + random(0, cap/2)`, `cap = base * 2^(attempt-1)`, base 500ms, so waits always grow (250-500ms, then 500ms-1s). `RATE_LIMITED` waits `Retry-After` when the vendor sends it (clamped to 0..60s) and counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`; checked before every claim too, so a reclaimed row whose attempts are used up fails without a send. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
+
+`expiresAt` is optional (spec 4.1) and the only overall deadline; there is no default TTL. Without it, the attempt budget and the `Retry-After` cap bound a delivery: at most 3 sends of up to 10s (`send-timeout`) and 2 waits of up to 60s, about 2.5 minutes worst case (a crash mid-send adds a lease, 30s, per reclaim). Delivery is asynchronous: the submit call returns `202` before any send, so a client's request timeout never applies to retries.
 
 ### Overall status (derived on read)
 
@@ -438,24 +444,55 @@ sequenceDiagram
     participant D as Database
     participant P as Provider adapter
     loop every poll interval
-        W->>D: select due deliveries (PENDING / RETRY_SCHEDULED, nextAttemptAt <= now) by priority
-        W->>D: claim (committed): status = SENDING, claimed_at = now, version + 1 where id, status, and version match
-        W->>P: send (idempotency key = deliveryId)
-        alt 200
-            W->>D: SENT + providerMessageId
-        else retryable
-            W->>D: RETRY_SCHEDULED, nextAttemptAt = now + backoff
-        else final
-            W->>D: FAILED + reason
+        W->>D: one query per due status and priority (PENDING, RETRY_SCHEDULED x HIGH, NORMAL, LOW) plus SENDING past the lease, best batch-size merged by priority, due time
+        W->>D: load the batch's notifications and recipients (findAllById)
+        alt past expiresAt
+            W->>D: EXPIRED + audit, no send
+        else
+            W->>D: claim (committed): SENDING, claimed_at = now, attempt + 1, version + 1 where id, status, and version match
+            W->>P: send outside any transaction (idempotency key = deliveryId)
+            alt 200
+                W->>D: SENT + providerMessageId
+            else retryable, attempts left, before expiresAt
+                W->>D: RETRY_SCHEDULED, nextAttemptAt = now + backoff
+            else
+                W->>D: FAILED + reason, or EXPIRED
+            end
+            Note over W,D: outcome and its audits in one transaction, where status = SENDING and version = the claim's
         end
-        W->>D: audit events (attempt, category, provider code)
     end
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
 - Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
-- The lease is longer than the provider timeout. A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
+- The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
+- The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
+- When a poll sees a full batch due, the poller polls again at once, for up to one poll interval, so a backlog drains at send speed instead of one batch per interval.
+- Rows are worked one at a time: claim, send, outcome.
+- A row that cannot be sent fails without a claim (conditional on the polled status and version), with an ERROR log by id and a `FAILED` audit: `NO_PROVIDER_ADAPTER`, `NO_ADDRESS`, `MISSING_RECIPIENT`, `MISSING_NOTIFICATION` (no audit: no source system). Any other error before the claim pushes `next_attempt_at` forward (backoff, at least 1s), so a poison row cannot keep sorting first and stall the queue.
+- A provider that throws counts as a `TRANSIENT` failure (code `exception`) and goes through the retry policy. An error after the claim (outcome write) leaves the row `SENDING`; it is reclaimed after the lease.
+- Shutdown: the worker stops between deliveries when the context closes or the thread is interrupted; the poller's scheduler waits `send-timeout` + 5s for the delivery in progress.
+- Each attempt runs under a fresh trace id, so its log lines (ids, channel, category, resulting state) can be grouped. Addresses and content are never logged.
+- `AUTH_ERROR` is also logged at ERROR: it means our credentials are wrong, not the recipient.
+
+Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 0.8s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`, or (`lease expired after expiresAt`) for a reclaimed one, which may have been sent.
+
+Worker settings:
+
+```yaml
+nms:
+  worker:
+    enabled: true          # NMS_WORKER_ENABLED; off = deliveries stay queued (tests drive runOnce())
+    poll-interval: 500ms   # fixed delay between polls (after a backlog drain of up to one interval); one thread
+    batch-size: 20         # rows worked per poll
+    lease: 30s             # SENDING older than this is reclaimed and resent; must exceed send-timeout
+    send-timeout: 10s      # adapter contract: send returns within this (TIMEOUT otherwise)
+    max-attempts: 3        # including the first (A-40)
+    backoff-base: 500ms    # retry n waits cap/2 + random(0, cap/2), cap = base * 2^(n-1); RATE_LIMITED waits Retry-After (max 60s)
+```
+
+Startup fails if a provider in `nms.routing.providers` has no adapter bean, or one for another channel.
 
 ### Callback
 
@@ -498,12 +535,13 @@ The delivery row is committed as `SENDING` before the send call, so even a callb
 |---|---|
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
-| Health | `/actuator/health` (database, worker liveness) |
-| Metrics | `nms.deliveries.outcome{channel,status}`, `nms.delivery.attempts{channel,category}`, `nms.deliveries.due` (backlog gauge) |
+| Health | `/actuator/health` (database only; the worker is not part of health) |
+| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `FAILED`, or `EXPIRED`; `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
+- `nms.deliveries.due` above 0 with no increase in `nms.delivery.attempts`: the poller has stopped (the gauge keeps its last value).
 - Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
 
 ## Scaling path (not built)

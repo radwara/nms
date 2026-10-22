@@ -1,0 +1,185 @@
+package com.example.nms.delivery;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.example.nms.delivery.RetryPolicy.Next;
+import com.example.nms.provider.ErrorCategory;
+import com.example.nms.provider.SendResult.Failed;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+
+/** #10, A-40 - A-44: retry decisions after a failed attempt (defaults: 3 attempts, 500ms). */
+class RetryPolicyTest {
+
+  private static final Instant NOW = Instant.parse("2026-01-01T00:00:00Z");
+  private static final Duration BASE = Duration.ofMillis(500);
+  private static final Failed TRANSIENT = new Failed(ErrorCategory.TRANSIENT, "503");
+
+  /** Records each jitter bound and returns the bound itself (the longest delay). */
+  private final List<Duration> bounds = new ArrayList<>();
+
+  private final RetryPolicy policy =
+      new RetryPolicy(
+          3,
+          BASE,
+          max -> {
+            bounds.add(max);
+            return max;
+          });
+
+  @Test
+  void backoffBoundDoublesPerAttempt() {
+    assertThat(policy.backoffCap(1)).isEqualTo(Duration.ofMillis(500));
+    assertThat(policy.backoffCap(2)).isEqualTo(Duration.ofSeconds(1));
+    assertThat(policy.backoffCap(3)).isEqualTo(Duration.ofSeconds(2));
+  }
+
+  @Test
+  void backoffBoundDoesNotOverflow() {
+    assertThat(policy.backoffCap(10_000)).isEqualTo(BASE.multipliedBy(1L << 30));
+  }
+
+  @Test
+  void delayIsHalfTheBoundPlusTheJitteredHalf() {
+    Next next = policy.after(2, TRANSIENT, NOW, null);
+
+    assertThat(next).isEqualTo(new Next.Retry(NOW.plusSeconds(1), Duration.ofSeconds(1)));
+    assertThat(bounds).containsExactly(Duration.ofMillis(500));
+  }
+
+  @Test
+  void withNoJitterTheDelayIsHalfTheBound() {
+    RetryPolicy shortest = new RetryPolicy(3, BASE, max -> Duration.ZERO);
+
+    assertThat(shortest.after(1, TRANSIENT, NOW, null))
+        .isEqualTo(new Next.Retry(NOW.plusMillis(250), Duration.ofMillis(250)));
+    assertThat(shortest.after(2, TRANSIENT, NOW, null))
+        .isEqualTo(new Next.Retry(NOW.plusMillis(500), Duration.ofMillis(500)));
+  }
+
+  @Test
+  void equalJitterDelaysStayInTheirRangeAndAlwaysGrow() {
+    RetryPolicy random = new RetryPolicy(10, BASE, Jitter.uniform());
+    for (int run = 0; run < 200; run++) {
+      Duration previous = Duration.ZERO;
+      for (int attempt = 1; attempt <= 5; attempt++) {
+        Next.Retry retry = (Next.Retry) random.after(attempt, TRANSIENT, NOW, null);
+        Duration cap = random.backoffCap(attempt);
+        assertThat(retry.delay()).isBetween(cap.dividedBy(2), cap);
+        assertThat(retry.at()).isEqualTo(NOW.plus(retry.delay()));
+        // Each range starts where the previous one ends, so a wait is never shorter.
+        assertThat(retry.delay()).isGreaterThanOrEqualTo(previous);
+        previous = retry.delay();
+      }
+    }
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = ErrorCategory.class,
+      names = {"TRANSIENT", "TIMEOUT", "RATE_LIMITED"})
+  void retryableCategoriesRetry(ErrorCategory category) {
+    assertThat(policy.after(1, new Failed(category, "x"), NOW, null))
+        .isInstanceOf(Next.Retry.class);
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = ErrorCategory.class,
+      names = {"PERMANENT_REJECTION", "INVALID_RECIPIENT", "AUTH_ERROR"})
+  void nonRetryableCategoriesFailWithTheCategory(ErrorCategory category) {
+    assertThat(policy.after(1, new Failed(category, "x"), NOW, null))
+        .isEqualTo(new Next.Fail(category.name()));
+  }
+
+  @Test
+  void lastAttemptFailsWithRetriesExhausted() {
+    assertThat(policy.after(2, TRANSIENT, NOW, null)).isInstanceOf(Next.Retry.class);
+    assertThat(policy.after(3, TRANSIENT, NOW, null))
+        .isEqualTo(new Next.Fail(RetryPolicy.RETRIES_EXHAUSTED));
+  }
+
+  @Test
+  void rateLimitedWaitsForRetryAfterWithoutJitter() {
+    Failed limited =
+        new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofSeconds(30)));
+
+    assertThat(policy.after(1, limited, NOW, null))
+        .isEqualTo(new Next.Retry(NOW.plusSeconds(30), Duration.ofSeconds(30)));
+    assertThat(bounds).isEmpty();
+  }
+
+  @Test
+  void rateLimitedWithoutRetryAfterBacksOff() {
+    assertThat(policy.after(1, new Failed(ErrorCategory.RATE_LIMITED, "429"), NOW, null))
+        .isEqualTo(new Next.Retry(NOW.plusMillis(500), Duration.ofMillis(500)));
+  }
+
+  @Test
+  void rateLimitedCountsTowardTheAttemptBudget() {
+    Failed limited =
+        new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofSeconds(1)));
+
+    assertThat(policy.after(3, limited, NOW, null))
+        .isEqualTo(new Next.Fail(RetryPolicy.RETRIES_EXHAUSTED));
+  }
+
+  @Test
+  void retryAtOrAfterExpiryExpires() {
+    assertThat(policy.after(1, TRANSIENT, NOW, NOW.plusMillis(500))).isEqualTo(new Next.Expire());
+    assertThat(policy.after(1, TRANSIENT, NOW, NOW.plusMillis(100))).isEqualTo(new Next.Expire());
+  }
+
+  @Test
+  void retryBeforeExpiryIsScheduled() {
+    assertThat(policy.after(1, TRANSIENT, NOW, NOW.plusMillis(500).plusNanos(1_000)))
+        .isInstanceOf(Next.Retry.class);
+  }
+
+  @Test
+  void exhaustedOnceMaxAttemptsHaveStarted() {
+    assertThat(policy.exhausted(2)).isFalse();
+    assertThat(policy.exhausted(3)).isTrue();
+    assertThat(policy.exhausted(4)).isTrue();
+  }
+
+  @Test
+  void retryAfterLongerThanSixtySecondsIsClamped() {
+    Failed limited =
+        new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofHours(3)));
+
+    assertThat(policy.after(1, limited, NOW, null))
+        .isEqualTo(new Next.Retry(NOW.plusSeconds(60), Duration.ofSeconds(60)));
+  }
+
+  @Test
+  void negativeRetryAfterIsClampedToZero() {
+    Failed limited =
+        new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofSeconds(-5)));
+
+    assertThat(policy.after(1, limited, NOW, null)).isEqualTo(new Next.Retry(NOW, Duration.ZERO));
+  }
+
+  @Test
+  void clampedRetryAfterStillExpiresAtExpiresAt() {
+    Failed limited =
+        new Failed(ErrorCategory.RATE_LIMITED, "429", Optional.of(Duration.ofHours(3)));
+
+    assertThat(policy.after(1, limited, NOW, NOW.plusSeconds(30))).isEqualTo(new Next.Expire());
+  }
+
+  @Test
+  void postponementIsTheNextBackoffBoundAndAtLeastASecond() {
+    assertThat(policy.postponement(0)).isEqualTo(Duration.ofSeconds(1));
+    assertThat(policy.postponement(2)).isEqualTo(Duration.ofSeconds(2));
+    assertThat(policy.postponement(3)).isEqualTo(Duration.ofSeconds(4));
+    assertThat(new RetryPolicy(3, Duration.ZERO, max -> max).postponement(0))
+        .isEqualTo(Duration.ofSeconds(1));
+  }
+}

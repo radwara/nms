@@ -48,6 +48,19 @@ nms:
     providers:
       EMAIL: sim-email
       SMS: sim-sms
+  worker:
+    # Delivery worker (ADR-0004). Off: nothing is sent; deliveries stay queued.
+    enabled: ${NMS_WORKER_ENABLED:true}
+    poll-interval: 500ms
+    batch-size: 20
+    # A SENDING claim older than this is reclaimed and resent with the same deliveryId.
+    lease: 30s
+    # Adapter contract: a send returns within this (TIMEOUT otherwise). Must be shorter than lease.
+    send-timeout: 10s
+    # Send attempts per delivery, including the first (A-40).
+    max-attempts: 3
+    # Retry n waits base * 2^(n-1) / 2 plus random up to the same again (equal jitter).
+    backoff-base: 500ms
   security:
     # keyId:sourceSystem:sha256hex[,...] (ADR-0001). Empty: every /api request is rejected with 401.
     api-keys: ${NMS_API_KEYS:}

@@ -59,6 +59,39 @@ public final class TestEntities {
         NOW);
   }
 
+  /** A notification for a seeded {@code recipientId}; {@code expiresAt} may be null. */
+  public static Notification notification(
+      String recipientId, Priority priority, Instant createdAt, Instant expiresAt) {
+    return new Notification(
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        "billing",
+        "evt-1",
+        "PAYMENT_DUE",
+        Severity.INFO,
+        priority,
+        recipientId,
+        null,
+        "subject",
+        "body",
+        null,
+        expiresAt,
+        createdAt);
+  }
+
+  /** A {@code PENDING} delivery via the channel's simulated provider, due at {@code dueAt}. */
+  public static Delivery delivery(Notification notification, Channel channel, Instant dueAt) {
+    return new Delivery(
+        UUID.randomUUID(),
+        notification.getId(),
+        channel,
+        "sim-" + channel.name().toLowerCase(Locale.ROOT),
+        notification.getPriority(),
+        RoutingReason.REQUESTED,
+        dueAt,
+        notification.getCreatedAt());
+  }
+
   public static IdempotencyRecord idempotencyRecord(String sourceSystem, String key) {
     return new IdempotencyRecord(
         sourceSystem, key, HASH, UUID.randomUUID(), NOW, NOW.plus(Duration.ofDays(7)));

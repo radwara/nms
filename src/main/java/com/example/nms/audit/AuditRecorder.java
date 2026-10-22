@@ -1,7 +1,9 @@
 package com.example.nms.audit;
 
 import com.example.nms.common.Channel;
+import java.math.BigDecimal;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Collection;
@@ -95,6 +97,95 @@ public class AuditRecorder {
     events.save(
         new AuditEvent(
             sourceSystem, notificationId, deliveryId, AuditEventType.QUEUED, channel, null, at));
+  }
+
+  /** The provider accepted the send ({@code SENT}); the final outcome comes by callback. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void sent(
+      String sourceSystem, UUID notificationId, UUID deliveryId, Channel channel, Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem, notificationId, deliveryId, AuditEventType.SENT, channel, null, at));
+  }
+
+  /**
+   * A send attempt failed, e.g. {@code attempt 2, TRANSIENT, code 503}. {@code providerCode} is the
+   * vendor's code (never a message) and may be null.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void attemptFailed(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      int attempt,
+      String category,
+      String providerCode,
+      Instant at) {
+    String detail =
+        "attempt "
+            + attempt
+            + ", "
+            + category
+            + (providerCode == null ? "" : ", code " + providerCode);
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            notificationId,
+            deliveryId,
+            AuditEventType.ATTEMPT_FAILED,
+            channel,
+            truncate(detail, MAX_DETAIL_LENGTH),
+            at));
+  }
+
+  /** The next attempt is due after {@code delay}, e.g. {@code in 1.5s}. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void retryScheduled(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      Duration delay,
+      Instant at) {
+    String seconds = BigDecimal.valueOf(delay.toMillis(), 3).stripTrailingZeros().toPlainString();
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            notificationId,
+            deliveryId,
+            AuditEventType.RETRY_SCHEDULED,
+            channel,
+            "in " + seconds + "s",
+            at));
+  }
+
+  /** Final failure; {@code reason} is a code, e.g. {@code INVALID_RECIPIENT}. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void failed(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      String reason,
+      Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem, notificationId, deliveryId, AuditEventType.FAILED, channel, reason, at));
+  }
+
+  /** Expired; {@code detail} says when, e.g. {@code before send}. */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void expired(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      String detail,
+      Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem, notificationId, deliveryId, AuditEventType.EXPIRED, channel, detail, at));
   }
 
   /**

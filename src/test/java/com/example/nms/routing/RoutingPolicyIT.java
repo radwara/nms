@@ -13,6 +13,9 @@ import com.example.nms.delivery.RoutingReason;
 import com.example.nms.intake.IntakeService;
 import com.example.nms.intake.SubmitCommand;
 import com.example.nms.intake.SubmitResult;
+import com.example.nms.provider.ChannelProvider;
+import com.example.nms.provider.SendRequest;
+import com.example.nms.provider.SendResult;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -20,11 +23,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * #9 (A-26): the routing policy comes from configuration. These properties replace the default
- * {@code CRITICAL: [SMS]} and the SMS provider from {@code application.yml}.
+ * {@code CRITICAL: [SMS]} and the SMS provider from {@code application.yml}; {@code alt-sms} is a
+ * test adapter, since startup requires one for every configured provider (#10).
  */
 @SpringBootTest(
     properties = {
@@ -32,6 +37,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
       "nms.routing.severity-escalation.WARNING=SMS",
       "nms.routing.providers.SMS=alt-sms"
     })
+@Import(RoutingPolicyIT.AltSmsProvider.class)
 class RoutingPolicyIT {
 
   @Autowired private IntakeService intake;
@@ -98,5 +104,24 @@ class RoutingPolicyIT {
         .filter(d -> d.getNotificationId().equals(notificationId))
         .sorted(Comparator.comparing(Delivery::getChannel))
         .toList();
+  }
+
+  /** An SMS adapter named {@code alt-sms}; these tests never send. */
+  static class AltSmsProvider implements ChannelProvider {
+
+    @Override
+    public String name() {
+      return "alt-sms";
+    }
+
+    @Override
+    public Channel channel() {
+      return Channel.SMS;
+    }
+
+    @Override
+    public SendResult send(SendRequest request) {
+      throw new UnsupportedOperationException("not sent in routing tests");
+    }
   }
 }

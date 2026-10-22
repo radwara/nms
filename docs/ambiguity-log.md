@@ -55,8 +55,8 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 
 | ID | Ambiguity | Assumption / decision | Status |
 |---|---|---|---|
-| A-40 | Retry bounds | Max attempts configurable (default 4), exponential backoff with jitter, never past expiration | Accepted |
-| A-41 | Rate limit counts toward attempt budget? | Yes, still bounded. Honor provider `Retry-After` when given | Accepted |
+| A-40 | Retry bounds | Max attempts configurable (default 3), exponential backoff from 500ms with equal jitter (waits always grow), never past expiration (engineer decision, #10) | Accepted |
+| A-41 | Rate limit counts toward attempt budget? | Yes, still bounded. Honor provider `Retry-After` when given, capped at 60s (engineer decision, #10) | Accepted |
 | A-42 | Timeout: provider may or may not have sent it | Retry with the same provider idempotency key so a well-behaved provider dedupes | Accepted |
 | A-43 | Auth error: retry or not? | Not retryable for the delivery (config problem, not delivery problem). Logged at error level and counted in metrics | Accepted |
 | A-44 | Permanent rejection vs invalid recipient | Both terminal, recorded with distinct reason codes | Accepted |
