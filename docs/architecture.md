@@ -37,6 +37,19 @@ flowchart LR
 | Status + audit | Read models; overall status derived on read |
 | Directory | Seeded recipients, contact addresses, channel preferences |
 
+## Key decisions
+
+| Decision | Choice | Record |
+|---|---|---|
+| Caller auth | Hashed, rotatable API key per source system; `sourceSystem` from the key; per-provider webhook token | [ADR-0001](adr/0001-api-authentication.md) |
+| Unit of tracking | One notification per recipient; required `Idempotency-Key`, honored 7 days | [ADR-0002](adr/0002-per-recipient-notifications-and-idempotency.md) |
+| Delivery status | Two-phase: vendor 200 = `SENT`, final outcome by callback; no callback stays `SENT` | [ADR-0003](adr/0003-two-phase-delivery-status.md) |
+| Queue | `delivery` table polled by one worker; versioned claim committed before the send | [ADR-0004](adr/0004-database-backed-delivery-queue.md) |
+| Stack | Java 21, Spring Boot, H2 (PostgreSQL mode), Flyway, JPA; one module, packaged by feature | [ADR-0005](adr/0005-technology-stack.md) |
+| Event dedup | Same event and message per recipient within 24h suppressed; routed originals only | [ADR-0006](adr/0006-event-level-deduplication.md) |
+| Overall status | Derived on read from deliveries, never stored | A-21, [Overall status](#overall-status-derived-on-read) |
+| CRITICAL vs opt-out | CRITICAL overrides opt-out on every channel; fixed rule | A-30, [ambiguous scenario](scenarios/ambiguous.md) |
+
 ## API
 
 API endpoints are under `/api/v1` (actuator is at `/actuator`, outside it). Callers authenticate with `X-API-Key` (ADR-0001). A source system can only read its own notifications.
