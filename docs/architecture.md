@@ -544,7 +544,7 @@ sequenceDiagram
 - Shutdown: the worker stops between deliveries when the context closes or the thread is interrupted; the poller's scheduler waits `send-timeout` + 5s for the delivery in progress.
 - Each attempt runs under a fresh trace id, so its log lines (ids, channel, category, resulting state) can be grouped. Addresses and content are never logged.
 - `AUTH_ERROR` is also logged at ERROR: it means our credentials are wrong, not the recipient.
-- Kafka fast path (ADR-0008, `nms.kafka.enabled`, off by default): after the submit transaction commits, each EMAIL delivery id is published to `nms.delivery.email` (key and value = id). The consumer calls `DeliveryWorker.process(id)`: skip unless `PENDING` and due, then the same per-row path as a poll (checks, rate limit, claim, send, outcome) on the listener thread, alongside the poller; the claim lets one send. The poller's `PENDING` queries then skip EMAIL rows due within `nms.kafka.poller-grace` (same index range, one extra condition); retries, lease reclaim and SMS are unchanged. A failed publish is logged, counted, and never fails the request; the poller sends the row after the grace.
+- Kafka fast path (ADR-0008, `nms.kafka.enabled`, off by default): after the submit transaction commits, each EMAIL delivery id is handed to one publish thread (bounded queue of 1,000 submissions; full: counted failed) and published to `nms.delivery.email` (key and value = id), so the request returns without waiting for Kafka and releases its connection; the producer is warmed at startup. The topic is declared with `nms.kafka.partitions` (3); the listener runs `nms.kafka.concurrency` (3) threads. The consumer calls `DeliveryWorker.process(id)`: skip unless `PENDING` and due, then the same per-row path as a poll (checks, rate limit, claim, send, outcome) on the listener thread, alongside the poller; the claim lets one send. The poller's `PENDING` queries then skip EMAIL rows created within `nms.kafka.poller-grace` and never moved (`created_at <= now - grace or version > 0`; same index range, one extra condition), so a scheduled send or a postponed / rate-deferred row goes to the poller when due; retries, lease reclaim and SMS are unchanged. A failed publish is logged, counted, and never fails the request; the poller sends the row after the grace.
 
 ```mermaid
 sequenceDiagram
@@ -557,7 +557,7 @@ sequenceDiagram
     I->>K: after commit: EMAIL delivery id (key = id)
     K->>C: id
     C->>D: load row; PENDING and due? then per-row path (claim on version, send, outcome)
-    W->>D: PENDING EMAIL only once due longer than poller-grace (missed publish)
+    W->>D: PENDING EMAIL only once created longer ago than poller-grace, or moved (missed publish)
 ```
 
 Audits per attempt: `ATTEMPT_FAILED` (`attempt 2, TRANSIENT, code 503`), then `RETRY_SCHEDULED` (`in 0.8s`), `FAILED` (reason), or `EXPIRED` (`next attempt after expiresAt`); `SENT` on acceptance; `EXPIRED` (`before send`) for a due delivery already past `expiresAt`, or (`lease expired after expiresAt`) for a reclaimed one, which may have been sent.
@@ -582,7 +582,9 @@ nms:
     default-per-source: 30 # any channel not listed
   kafka:                   # ADR-0008
     enabled: false         # NMS_KAFKA_ENABLED; broker from SPRING_KAFKA_BOOTSTRAP_SERVERS
-    poller-grace: 30s      # with Kafka on, EMAIL first dispatch is left to Kafka this long; positive
+    poller-grace: 30s      # with Kafka on, a new unmoved EMAIL row is left to Kafka this long after creation; positive
+    partitions: 3          # topic partitions when created here; positive
+    concurrency: 3         # consumer threads; positive
 spring:
   kafka:                   # used only with nms.kafka.enabled=true
     producer:
@@ -593,7 +595,7 @@ spring:
       auto-offset-reset: earliest  # a new group starts at the oldest message; sent ids are skipped
 ```
 
-Kafka fast path limitations: not a transactional outbox, so a lost publish (crash after commit, broker down) waits for the grace window; EMAIL first dispatch not due at publish time (scheduled) or deferred by the rate limit goes out up to one grace late (poller); with the broker down a submission waits up to `max.block.ms` once on the request thread; the poller still reads in-grace EMAIL rows (skipped by the extra condition); one topic, no ordering needed.
+Kafka fast path limitations: not a transactional outbox, so a lost publish (crash after commit, broker down, full publish queue, shutdown with queued publishes) waits for the grace window; the consumer works in topic order, not priority, so under consumer lag a CRITICAL / HIGH EMAIL waits behind earlier messages (worst case the poller takes it after the grace, by priority); a send scheduled less than one grace after submission goes out at creation + grace (poller), not at its due time; with the broker down the publish thread works one submission per `max.block.ms`; the poller still reads in-grace EMAIL rows (skipped by the extra condition); no ordering needed across messages.
 
 Rate limit limitations: counts are per instance and reset on restart (N instances allow N x limit); up to 2 x limit in a burst across a window boundary; a key's deferred backlog becomes due together at each window end and is re-swept by one update per window (spreading it over future windows is a follow-up).
 
@@ -670,7 +672,7 @@ What to alert on:
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
 - `nms.deliveries.due` above 0 with no increase in `nms.delivery.attempts`: the poller has stopped (the gauge keeps its last value).
 - Sustained `nms.delivery.deferred{reason="rate_limited"}`: a source is above its limit (find it in the worker's DEBUG log); raise `nms.rate-limit.per-source.<CHANNEL>` (restart) only if the volume is legitimate.
-- Kafka on: any `nms.kafka.published{outcome="failed"}`: the broker is unreachable; EMAIL still goes out via the poller, one grace later. Consumer lag (`kafka_consumer_fetch_manager_records_lag_max` from the client metrics Boot binds, or the broker's group lag for `nms-delivery`) growing past the grace: the poller is taking EMAIL first dispatch too; both paths are safe together (claim).
+- Kafka on: any `nms.kafka.published{outcome="failed"}`: the broker is unreachable or the publish queue is full; EMAIL still goes out via the poller, one grace later. Consumer lag (`kafka_consumer_fetch_manager_records_lag_max` from the client metrics Boot binds, or the broker's group lag for `nms-delivery`) growing past the grace: the poller is taking EMAIL first dispatch too; both paths are safe together (claim).
 - Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
 - Suppression ratio `nms.notifications.submitted{outcome="suppressed"} / sum(nms.notifications.submitted)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. Check the `SUPPRESSED` audit events (`duplicate of <id>`) of that source; if dedup is wrong, set `NMS_DEDUP_ENABLED=false` (no data change, takes effect on restart). A rising `nms.dedup.lookup` p99 means the lookup is reading more rows than it should (check the index plan). The after-commit log line `Submission <id> accepted: <n> notifications, <m> suppressed, for source system <s>` gives the per-submission split.
 
