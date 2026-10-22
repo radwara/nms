@@ -4,7 +4,7 @@ import com.example.nms.common.Channel;
 import java.time.Instant;
 import java.util.Optional;
 
-/** Outbound send limit per source system and channel, checked just before each claim (#46). */
+/** Outbound send limit per source system and channel, checked just before each claim (ADR-0007). */
 interface RateLimiter {
 
   /** Allows every send. */

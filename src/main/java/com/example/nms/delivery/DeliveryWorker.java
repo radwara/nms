@@ -40,9 +40,9 @@ import org.springframework.stereotype.Component;
 /**
  * Sends due deliveries (ADR-0004). One poll reads each due status separately, merges by priority
  * then due time, and works the best {@code batch-size} rows one by one: expire or fail a row that
- * cannot be sent (no claim), or claim (committed) then send outside any transaction then write the
- * outcome (conditional on the claim's version). Each row runs under its own trace id. Addresses and
- * content are never logged.
+ * cannot be sent (no claim), defer a rate-limited one to the next window (no claim, ADR-0007), or
+ * claim (committed) then send outside any transaction then write the outcome (conditional on the
+ * claim's version). Each row runs under its own trace id. Addresses and content are never logged.
  */
 @Component
 public class DeliveryWorker {
@@ -347,13 +347,17 @@ public class DeliveryWorker {
   }
 
   /**
-   * Moves the row's due time to {@code until} without a claim: status and attempts unchanged, no
-   * audit (not a state change). Returns {@code false}: no attempt or final state was written.
+   * Rate limited: moves the row's due time to {@code until} (the window end) without a claim.
+   * Status and attempts unchanged, no audit (not a state change), DEBUG log only. Returns {@code
+   * false}: no attempt or final state was written.
    */
   private boolean defer(Delivery delivery, Instant until, Instant now) {
     int moved =
         deliveries.postpone(
             delivery.getId(), delivery.getStatus(), delivery.getVersion(), until, now);
+    if (moved == 1) {
+      metrics.deferred(delivery.getChannel(), DeliveryMetrics.RATE_LIMITED);
+    }
     log.debug(
         "Delivery {} on {} rate limited; {} to {}",
         delivery.getId(),

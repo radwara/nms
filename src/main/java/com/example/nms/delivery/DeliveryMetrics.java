@@ -16,6 +16,9 @@ class DeliveryMetrics {
 
   static final String ACCEPTED = "ACCEPTED";
 
+  /** {@code reason} of a delivery deferred by the outbound rate limit (ADR-0007). */
+  static final String RATE_LIMITED = "rate_limited";
+
   private final MeterRegistry registry;
   private final AtomicInteger due = new AtomicInteger();
   private final Timer pollTimer;
@@ -47,6 +50,16 @@ class DeliveryMetrics {
         .description("Deliveries reaching SENT, DELIVERED, FAILED, or EXPIRED")
         .tag("channel", channel.name())
         .tag("status", status.name())
+        .register(registry)
+        .increment();
+  }
+
+  /** A due delivery's next attempt was moved without a claim; {@code reason} is a constant. */
+  void deferred(Channel channel, String reason) {
+    Counter.builder("nms.delivery.deferred")
+        .description("Due deliveries deferred without a claim, by reason")
+        .tag("channel", channel.name())
+        .tag("reason", reason)
         .register(registry)
         .increment();
   }

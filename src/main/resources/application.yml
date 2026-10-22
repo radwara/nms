@@ -70,6 +70,16 @@ nms:
     max-attempts: 3
     # Retry n waits base * 2^(n-1) / 2 plus random up to the same again (equal jitter).
     backoff-base: 500ms
+  rate-limit:
+    # Outbound sends per source system and channel per fixed window (ADR-0007); every attempt counts,
+    # CRITICAL included. Over the limit a delivery waits for the next window (status unchanged).
+    # In memory, per instance. All values must be positive; read at startup.
+    window: 1m
+    per-source:
+      EMAIL: 600
+      SMS: 60
+    # Any channel not listed under per-source.
+    default-per-source: 30
   simulator:
     callbacks:
       # Simulated vendors post the outcome to our webhook after accepting a send (ADR-0003).

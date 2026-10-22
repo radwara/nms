@@ -11,7 +11,7 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(WorkerProperties.class)
+@EnableConfigurationProperties({WorkerProperties.class, RateLimitProperties.class})
 class WorkerConfiguration {
 
   @Bean
@@ -19,10 +19,9 @@ class WorkerConfiguration {
     return Jitter.uniform();
   }
 
-  /** Allows every send. */
   @Bean
-  RateLimiter rateLimiter() {
-    return RateLimiter.ALLOW_ALL;
+  RateLimiter rateLimiter(RateLimitProperties properties) {
+    return new FixedWindowRateLimiter(properties);
   }
 
   @Bean
