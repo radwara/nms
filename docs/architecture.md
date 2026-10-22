@@ -29,7 +29,7 @@ flowchart LR
 | Component | Responsibility |
 |---|---|
 | API + auth | REST endpoints, validation, API-key and webhook-token auth, error mapping |
-| Intake | Idempotency check, split request into one notification per recipient, persist |
+| Intake | Idempotency check, split request into one notification per recipient, event dedup (ADR-0006), persist |
 | Routing | Resolve channels per recipient from request, preferences, and policy |
 | Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire |
 | Provider adapters | One per channel: send call and error classification only. Callbacks are parsed in `api.CallbackRequestValidator` (one generic format) and mapped event -> status in `delivery.DeliveryCallbacks`. Production path: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built) |
@@ -84,10 +84,13 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 {
   "notifications": [
     { "recipientId": "user1", "notificationId": "6f1c...", "status": "ACCEPTED" },
-    { "recipientId": "user2", "notificationId": "a83d...", "status": "ACCEPTED" }
+    { "recipientId": "user2", "notificationId": "a83d...", "status": "SUPPRESSED", "duplicateOf": "9b2e..." }
   ]
 }
 ```
+
+- Per-item `status`: `ACCEPTED`, or `SUPPRESSED` when the recipient already got the same event and message under another key within the dedup window (see Event dedup). `duplicateOf` (the original's id) appears only on suppressed items, so a submission without suppressed recipients has the greenfield body.
+- Still `202` when some or all recipients are suppressed (the key is claimed and rows are written); a replay returns the same body, `SUPPRESSED` items included. Clients must read per-item `status`, not only the HTTP code.
 
 ### Status
 
@@ -103,6 +106,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
   "overallStatus": "PARTIALLY_DELIVERED",
   "duplicateSubmissions": 1,
   "createdAt": "...", "scheduledAt": null, "expiresAt": "...",
+  "duplicateOf": null,
   "deliveries": [
     { "deliveryId": "d5e1...", "channel": "EMAIL", "status": "DELIVERED", "attempts": 2, "sentAt": "...", "finalizedAt": "..." },
     { "deliveryId": "a07b...", "channel": "SMS", "status": "FAILED", "attempts": 1, "reason": "INVALID_RECIPIENT", "finalizedAt": "..." }
@@ -111,8 +115,9 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 ```
 
 - One entry per routed channel (selected channels, FR-2.2), ordered by channel. `requestedChannels` is `null` when preferences were used; compare it with `deliveries` to see what routing changed (details in the audit).
-- `overallStatus` is derived on read (see Overall status). `duplicateSubmissions` counts the notification's `DUPLICATE_SUBMISSION` audit events.
-- Top-level timestamps are always present (`null` when unset); per-delivery `reason`, `sentAt`, `finalizedAt` appear once they apply. `deliveryId` is the id providers call back with.
+- `overallStatus` is derived on read (see Overall status). `duplicateSubmissions` counts the notification's `DUPLICATE_SUBMISSION` audit events (same-key replays).
+- `duplicateOf` is the original's id on a `SUPPRESSED` notification (`deliveries: []`), else `null`. A dangling id (original purged) is returned as-is; `GET` on it is 404.
+- Top-level fields are always present (`null` when unset); per-delivery `reason`, `sentAt`, `finalizedAt` appear once they apply. `deliveryId` is the id providers call back with.
 - Unknown id, malformed id, and another source system's id are the same 404 / 4041: the id is bound as a string and parsed strictly (canonical UUID, either case), and the lookup is `id and source_system`.
 
 ### Audit
@@ -300,8 +305,10 @@ Seeded recipients:
 | `subject`, `body` | varchar(200), varchar(5000) | Sensitive; stored only here, plaintext in the prototype |
 | `scheduled_at`, `expires_at` | timestamp null | |
 | `created_at` | timestamp | |
+| `content_hash` | char(64) null | SHA-256 (lowercase hex) of `{"body","severity","subject"}` written by the shared `JsonMapper`, values as validated (V3, ADR-0006). Null only on rows written before V3, which never match. Never returned, logged, or audited |
+| `duplicate_of` | uuid null | Original's id on a suppressed notification (no deliveries); null on originals. No FK (like `audit_event.notification_id`), so an original can be purged first |
 
-No status column: overall status is derived from deliveries.
+Index `(source_system, event_id, type, recipient_id, content_hash, created_at)` serves the dedup lookup. No status column: overall status is derived from deliveries and `duplicate_of`.
 
 ### Delivery
 
@@ -333,7 +340,7 @@ No status column: overall status is derived from deliveries.
 | `source_system` | varchar(64) | |
 | `notification_id` | uuid null, indexed | Null for `REJECTED` requests (spec 4.9). Only authenticated requests are audited; written in its own transaction because the submission rolled back |
 | `delivery_id` | uuid null | |
-| `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `QUEUED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
+| `type` | varchar(32) | `ACCEPTED`, `REJECTED`, `DUPLICATE_SUBMISSION`, `SUPPRESSED` (detail `duplicate of <originalId>`), `DUPLICATE_EVENT` (on the original, detail `suppressed <newId>`), `ROUTED`, `ROUTE_REMOVED`, `NOT_ROUTED`, `QUEUED`, `ATTEMPT_FAILED`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED`, `CALLBACK_IGNORED` |
 | `channel` | varchar(16) null | |
 | `detail` | varchar(256) null | Codes and reasons only (attempt number, error category, provider code); never content or addresses. Replaces a separate attempts table |
 | `occurred_at` | timestamp | |
@@ -410,6 +417,7 @@ First matching row wins (`status.OverallStatus.derive`, unit-tested per row):
 
 | Deliveries | `overallStatus` |
 |---|---|
+| Suppressed at intake (`duplicate_of` set; no deliveries) | `SUPPRESSED` |
 | No deliveries | `NOT_ROUTED` (also before `scheduledAt`: nothing will be sent) |
 | Before `scheduledAt`, all `PENDING` | `SCHEDULED` |
 | Any `PENDING`, `SENDING`, `RETRY_SCHEDULED` | `IN_PROGRESS` |
@@ -419,7 +427,7 @@ First matching row wins (`status.OverallStatus.derive`, unit-tested per row):
 | None delivered, all `EXPIRED` | `EXPIRED` |
 | None delivered, otherwise | `FAILED` |
 
-"Delivered" means every routed channel was delivered, not "recipient reached on some channel" (A-22). `NOT_ROUTED` is checked first (A-24).
+"Delivered" means every routed channel was delivered, not "recipient reached on some channel" (A-22). `SUPPRESSED`, then `NOT_ROUTED`, are checked first (A-24, ADR-0006).
 
 ## Control flow
 
@@ -446,9 +454,10 @@ sequenceDiagram
             I-->>S: 422, all of them; nothing written
         else accepted
             I->>D: claim key: insert record, or conditional update of the expired one
-            I->>D: insert Notifications (batched), flush
-            I->>D: audit ACCEPTED per notification
-            I->>D: route the submission once (Deliveries, ROUTED / ROUTE_REMOVED / NOT_ROUTED, QUEUED)
+            I->>D: dedup lookup, one query for all recipients (skipped when disabled)
+            I->>D: insert Notifications (batched; suppressed ones with duplicate_of), flush
+            I->>D: audit ACCEPTED per original; SUPPRESSED + DUPLICATE_EVENT per duplicate
+            I->>D: route the originals once (Deliveries, ROUTED / ROUTE_REMOVED / NOT_ROUTED, QUEUED)
             I-->>S: 202 + notifications (after commit)
         end
     end
@@ -459,6 +468,31 @@ One transaction per submission: the idempotency record, notifications, audits, a
 Rejections after authentication (400, 409, 413, 422) are audited as `REJECTED` in a separate transaction, `detail` = distinct error codes and the trace id (e.g. `codes 4004,4003; trace 8f3c...`). "One key, one outcome" applies to accepted submissions: rejections are not stored, so a corrected retry with the same key can succeed.
 
 Replay reads only `(recipientId, id)` pairs by `submissionId` (no entity loads) and writes one `DUPLICATE_SUBMISSION` per notification. Trade-off: a replay of 100 recipients is 100 audit inserts (batched), in exchange for every notification's own history and duplicate count (status `duplicateSubmissions`, #11) being one indexed lookup. One event per submission would need a join on `submissionId` for every status read.
+
+### Event dedup (ADR-0006)
+
+A recipient is suppressed when an **original** notification with the same `(source_system, event_id, type, recipient_id, content_hash)` was created within the window. A different message for the same event (subject, body, or severity changed) is always delivered.
+
+```yaml
+nms:
+  dedup:
+    enabled: ${NMS_DEDUP_ENABLED:true}   # false = greenfield behaviour: no lookup, nothing suppressed
+    window: ${NMS_DEDUP_WINDOW:24h}      # must be positive; startup fails otherwise
+```
+
+- Window: `created_at > now - window` (strict), from the original's submission time, not `scheduledAt`. Suppressed rows never anchor, so a source resending every hour is not suppressed forever; `duplicate_of` always points at an original.
+- Order: live idempotency record (200 replay / 409) and 422 first, then the key is claimed, then dedup. A fully suppressed submission still claims its key, so a retry with that key replays the suppressed outcome (also after the window).
+- The original's delivery outcome is ignored (a `FAILED` or `NOT_ROUTED` original still anchors): retrying failed sends is the worker's job. A caller who wants a fresh send uses a new `eventId`.
+- Not part of the message: `channels`, `priority`, `scheduledAt`, `expiresAt`. A resend that only adds a channel is suppressed.
+- Suppressed rows keep `subject` / `body` (columns stay `not null`): one extra content copy, never read. Production path: clear it with the "clear `body` once final" path.
+- `content_hash` is written even when dedup is disabled, so turning it back on works at once.
+- `nms.dedup.window` is independent of `nms.idempotency.retention` (A-36). With the defaults a key expires after the window, so a reused key cannot suppress; if `window > retention`, a key reused after retention can be suppressed (consistent, not rejected at startup).
+
+Limitations:
+- Race: two submissions of the same event and message under different keys that commit concurrently both pass the lookup and both are delivered (fails open: greenfield behaviour, never a lost notification; pinned by `EventDedupRaceIT`). A window cannot be a unique constraint. Production path: `pg_advisory_xact_lock(hash(key))` per recipient in sorted key order, with `lock_timeout` set; lock failures need their own handling, since today a `PessimisticLockingFailureException` maps to 409 / 4092 and a lost unique claim to 500.
+- A resend with reworded text is not caught (safe direction: a possible extra message).
+- Rows written before V3 have no hash and never anchor: in the first window after deploy a resend of a pre-deploy event is delivered.
+- Code rollback after suppressed rows exist: old code reads them as `NOT_ROUTED` and a same-key replay reports them `ACCEPTED`. Turn dedup off (`NMS_DEDUP_ENABLED=false`) instead of rolling back code.
 
 ### Deliver
 
@@ -570,6 +604,7 @@ nms:
 - Tenant isolation: reads are scoped to the caller's source system; other ids return 404.
 - Input limits: JSON bodies max 64 KB (413 / 4130, enforced while parsing, so chunked bodies are bounded too), max 100 recipients, bounded `subject` and `body` length, enum validation.
 - Sensitive data: message content and contact details never appear in logs, audit events, or error bodies. Audit and logs reference ids only.
+- Event dedup: the key includes `source_system` (from the API key), so one tenant cannot suppress another's notifications. `content_hash` is an unsalted SHA-256 of short, partly predictable text, so it is never returned, logged, or audited; production path: HMAC with a server-held key. `duplicateOf` is returned only to the same source system.
 - Secrets come from environment variables; nothing secret is committed. The plaintext tokens of the simulated callbacks are the documented demo tokens (dev profile and tests only).
 - Actuator exposes only `health`, `info`, `prometheus`. The H2 console is off outside the `dev` profile.
 - Actuator is outside API-key auth: `health` and, in the prototype, `prometheus` need no key. In production actuator is served on an internal management port.
@@ -581,13 +616,14 @@ nms:
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health`: Spring Boot defaults (`db`, `diskSpace`, `ping`); the worker is not part of health |
-| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
+| Metrics | `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
 - `nms.deliveries.due` above 0 with no increase in `nms.delivery.attempts`: the poller has stopped (the gauge keeps its last value).
 - Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
+- Suppression ratio `nms.notifications.submitted{outcome="suppressed"} / sum(nms.notifications.submitted)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. Check the `SUPPRESSED` audit events (`duplicate of <id>`) of that source; if dedup is wrong, set `NMS_DEDUP_ENABLED=false` (no data change, takes effect on restart). The after-commit log line `Submission <id> accepted: <n> notifications, <m> suppressed, for source system <s>` gives the per-submission split.
 
 ## Scaling path (not built)
 
@@ -600,6 +636,7 @@ What to alert on:
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
 | Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
 | Lock waits | H2 `LOCK_TIMEOUT` (default 2 s) triggers 409/4092 for a racing retry | Set PostgreSQL `lock_timeout` (it waits forever by default) so the 4092 path engages |
+| Event dedup race | Documented: concurrent repeats under different keys both pass | `pg_advisory_xact_lock` per dedup key, sorted, with its own lock-failure handling; dedup index built `concurrently`, partial `where duplicate_of is null` |
 
 ## Out of scope
 
