@@ -2,7 +2,7 @@
 
 - Status: Accepted (2026-10-20)
 - Issue: #2
-- Related: A-11, A-25, A-35, A-36, A-38
+- Related: A-11, A-25, A-35, A-36, A-38; event-level dedup on top of the key: ADR-0006
 
 ## Context
 
