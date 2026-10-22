@@ -47,7 +47,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 
 | ID | Ambiguity | Assumption / decision | Status |
 |---|---|---|---|
-| A-35 | Dedup boundary | Submission: one outcome per (source system, idempotency key). A request with N recipients becomes N notifications sharing an internal `submissionId`. Delivery: one per (notification, channel), unique constraint. Callbacks: one per (provider, event key) (#2, ADR-0002) | Accepted |
+| A-35 | Dedup boundary | Submission: one outcome per (source system, idempotency key). A request with N recipients becomes N notifications sharing an internal `submissionId`. Delivery: one per (notification, channel), unique constraint. Callbacks: deduped by delivery state (only `SENDING`, `SENT`, `RETRY_SCHEDULED` change; repeats and late events are audited `CALLBACK_IGNORED`), no event key (#2, ADR-0002, ADR-0003, A-47) | Accepted |
 | A-38 | Recipients per request; unknown recipient | Max 100. Any unknown recipient rejects the whole request (422 / 4223), all listed. Atomic: one key = one outcome (#2) | Accepted |
 | A-36 | Retention | Idempotency keys honored for 7 days (configurable); after that a key may create a new notification | Accepted |
 | A-37 | Exactly-once delivery? | Not achievable with external providers. At-least-once with a per-delivery provider idempotency key; documented as a limitation | Accepted |

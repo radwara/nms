@@ -19,11 +19,11 @@ The role centers on Java and Spring Boot. Reviewers must be able to run the prot
 | Concern | Choice | Why |
 |---|---|---|
 | Language | Java 21 | Current LTS; records, pattern matching |
-| Framework | Spring Boot (current GA, pinned in `pom.xml`) | Web, validation, security, data, actuator, scheduling in one stack |
+| Framework | Spring Boot (current GA, pinned in `pom.xml`) | Web, data, actuator, scheduling in one stack |
 | Build | Maven with wrapper (`./mvnw`) | No local Maven install needed |
 | Database | H2 (file-backed locally, in-memory in tests), PostgreSQL compatibility mode, UTC timestamps | Zero setup; PostgreSQL is the production path |
 | Schema | Flyway migrations | Versioned, reviewable schema changes |
-| Persistence | Spring Data JPA | Optimistic locking via `@Version` |
+| Persistence | Spring Data JPA | `version` column as conditional-update token |
 | Metrics | Micrometer + Prometheus registry | Standard Spring Boot observability |
 | Code quality | Spotless (formatter check), `-Xlint:all -Werror` | Formatting and warnings enforced in CI |
 | Logging | Spring Boot structured logging | JSON logs with one property |

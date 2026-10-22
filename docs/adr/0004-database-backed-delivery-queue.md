@@ -28,6 +28,14 @@ The `delivery` table is the queue.
 - The lease is longer than the provider timeout. A row stuck in `SENDING` past the lease is reclaimable after a crash; the resend reuses the same provider idempotency key (`deliveryId`).
 - Priority is copied onto the delivery as a number so the poll sorts correctly with an index on `(status, priority, next_attempt_at)`.
 
+## Revision (2026-10-21, #13)
+
+The decision stands; three details changed during implementation (architecture.md is current):
+
+- Callback writes are conditional on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)` (#11, A-47), not `id` and `status in (SENDING, SENT)`.
+- The poll is one bounded query per (status, priority), merged in Java by priority then due time (#10 performance review), not one ordered query.
+- Due time is `next_attempt_at = max(now, scheduledAt)` (#9): a past `scheduledAt` is sent now (A-16).
+
 ## Consequences
 
 - Plus: durable, restart-safe, no extra infrastructure, retries and scheduling come from one column.

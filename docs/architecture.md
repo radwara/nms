@@ -18,7 +18,7 @@ flowchart LR
         ROUTE --> DB[(Database)]
         WORKER[Delivery worker] --> DB
         WORKER --> PROV[Provider adapters]
-        HOOK[Webhook handler] --> DB
+        HOOK[Webhook handler] --> CB[DeliveryCallbacks] --> DB
         API --> STATUS[Status + audit queries] --> DB
     end
 
@@ -32,14 +32,14 @@ flowchart LR
 | Intake | Idempotency check, split request into one notification per recipient, persist |
 | Routing | Resolve channels per recipient from request, preferences, and policy |
 | Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire |
-| Provider adapters | One per channel: send call, error classification, callback event mapping |
+| Provider adapters | One per channel: send call and error classification only. Callbacks are parsed in `api.CallbackRequestValidator` (one generic format) and mapped event -> status in `delivery.DeliveryCallbacks`. Production path: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built) |
 | Webhook handler | Authenticate (token filter) and validate the callback, hand it to `DeliveryCallbacks` in `delivery`, which dedupes by state and applies the final status |
 | Status + audit | Read models; overall status derived on read |
 | Directory | Seeded recipients, contact addresses, channel preferences |
 
 ## API
 
-All endpoints are under `/api/v1`. Callers authenticate with `X-API-Key` (ADR-0001). A source system can only read its own notifications.
+API endpoints are under `/api/v1` (actuator is at `/actuator`, outside it). Callers authenticate with `X-API-Key` (ADR-0001). A source system can only read its own notifications.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -148,10 +148,11 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 - Dedupe by state: only a `SENDING`, `SENT`, or `RETRY_SCHEDULED` delivery of the same provider changes. `SENDING` covers a callback that beats our `SENT` write; `RETRY_SCHEDULED` covers a vendor that accepted an attempt we classified as failed (e.g. `TIMEOUT`): the callback applies and cancels the retry, since the write clears `next_attempt_at` and bumps `version`, so the pending retry's claim fails and nothing is sent again (A-47). Everything else is audited `CALLBACK_IGNORED` with the reason and event, e.g. `already DELIVERED; event FAILED`, `provider mismatch; event DELIVERED`, `while PENDING; event DELIVERED` (never sent), `late after expiry; event DELIVERED` (A-48).
 - `finalized_at` is our receive time; `occurredAt` is validated but not stored, so vendor clock skew cannot reorder history.
 - Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged at INFO, no audit (no source system to file it under), no counter.
+- A 5xx happens only when the row lock times out or in the concurrent message-id race (below); the vendor retries, and the retry is deduped by state.
 - `delivery.DeliveryCallbacks.apply` is the only callback writer: row lock, conditional update, audit, and (after commit) `nms.deliveries.outcome` in one transaction. The webhook controller only binds and validates.
 - The row is locked (`select ... for update`) before the clock is read, so a worker `SENT` write that commits first is always earlier: `finalized_at >= sent_at`, and the history reads `SENT`, then the callback's event.
 - `provider_message_id` is unique per provider. If the delivery has none and another delivery of that provider already holds the callback's id, the outcome still applies without the id, and the audit detail says `message id conflict` (still `200`).
-- Mapping real vendor payloads (event names, batching, signatures) is production work inside each provider adapter.
+- Mapping real vendor payloads (event names, batching, signatures) is production work: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built). Today `api.CallbackRequestValidator` parses the one generic format and `DeliveryCallbacks` maps event -> status; provider adapters only send.
 
 ### Errors
 
@@ -159,7 +160,7 @@ Every error, including authentication failures raised before any controller, use
 
 ```json
 {
-  "traceId": "8f3c2a1b9d",
+  "traceId": "8f3c2a1b9d4e5f60718293a4b5c6d7e8",
   "errors": [
     { "code": 4001, "field": "Idempotency-Key", "message": "Required header is missing" },
     { "code": 4004, "field": "recipients[2].userId", "message": "Must not be blank" }
@@ -202,8 +203,8 @@ Every error, including authentication failures raised before any controller, use
 
 ```mermaid
 erDiagram
-    IDEMPOTENCY_RECORD ||--|{ NOTIFICATION : "submissionId"
-    NOTIFICATION ||--|{ DELIVERY : "one per channel"
+    IDEMPOTENCY_RECORD |o--|{ NOTIFICATION : "submissionId"
+    NOTIFICATION ||--o{ DELIVERY : "one per channel"
     NOTIFICATION ||--o{ AUDIT_EVENT : "history"
     RECIPIENT ||--o{ CHANNEL_PREFERENCE : "per channel"
     RECIPIENT ||--o{ NOTIFICATION : "recipientId"
@@ -399,7 +400,7 @@ stateDiagram-v2
 | `INVALID_RECIPIENT` | Bad address or number | `FAILED` |
 | `AUTH_ERROR` | Vendor rejects our credentials | `FAILED`, error log, metric (config problem, not delivery problem) |
 
-Retries: max 3 attempts (configurable), exponential backoff with equal jitter: `cap/2 + random(0, cap/2)`, `cap = base * 2^(attempt-1)`, base 500ms, so waits always grow (250-500ms, then 500ms-1s). `RATE_LIMITED` waits `Retry-After` when the vendor sends it (clamped to 0..60s) and counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`; checked before every claim too, so a reclaimed row whose attempts are used up fails without a send. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
+Retries: max 3 attempts (configurable), exponential backoff with equal jitter: `cap/2 + random(0, cap/2)`, `cap = base * 2^(attempt-1)`, base 500ms, so waits always grow (250-500ms, then 500ms-1s). Any retryable failure that carries `Retry-After` waits for it instead of the backoff (clamped to 0..60s; the simulated vendors send it only with `RATE_LIMITED`), and it counts toward the attempts (A-41). If the next attempt would fall at or after `expiresAt`, the delivery becomes `EXPIRED`. Attempts exhausted: `FAILED` with reason `RETRIES_EXHAUSTED`; checked before every claim too, so a reclaimed row whose attempts are used up fails without a send. A due delivery already past `expiresAt` becomes `EXPIRED` without a send.
 
 `expiresAt` is optional (spec 4.1) and the only overall deadline; there is no default TTL. Without it, the attempt budget and the `Retry-After` cap bound a delivery: at most 3 sends of up to 10s (`send-timeout`) and 2 waits of up to 60s, about 2.5 minutes worst case (a crash mid-send adds a lease, 30s, per reclaim). Delivery is asynchronous: the submit call returns `202` before any send, so a client's request timeout never applies to retries.
 
@@ -512,7 +513,7 @@ nms:
     lease: 30s             # SENDING older than this is reclaimed and resent; must exceed send-timeout
     send-timeout: 10s      # adapter contract: send returns within this (TIMEOUT otherwise)
     max-attempts: 3        # including the first (A-40)
-    backoff-base: 500ms    # retry n waits cap/2 + random(0, cap/2), cap = base * 2^(n-1); RATE_LIMITED waits Retry-After (max 60s)
+    backoff-base: 500ms    # retry n waits cap/2 + random(0, cap/2), cap = base * 2^(n-1); a failure with Retry-After waits for it (max 60s)
 ```
 
 Startup fails if a provider in `nms.routing.providers` has no adapter bean, or one for another channel.
@@ -526,18 +527,16 @@ sequenceDiagram
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
     H->>H: authenticate (filter), validate body
-    H->>D: DeliveryCallbacks.apply (one transaction, row locked first)
+    H->>D: DeliveryCallbacks.apply (one transaction): lock the row (select ... for update), then read the clock
     alt unknown deliveryId
         D-->>H: UNKNOWN (logged)
-    else provider differs from the token's
+    else provider differs from the token's (checked on the locked row)
         D->>D: audit CALLBACK_IGNORED (provider mismatch)
-    else
-        D->>D: update: final status, reason, finalized_at = now, sent_at = coalesce(sent_at, now), provider_message_id = coalesce(..), version + 1 where id, provider, status in (SENDING, SENT, RETRY_SCHEDULED)
-        alt one row updated
-            D->>D: audit DELIVERED or FAILED, outcome metric after commit
-        else final, expired, or PENDING (never sent)
-            D->>D: audit CALLBACK_IGNORED (why and event)
-        end
+    else final, expired, or PENDING (status checked on the locked row)
+        D->>D: audit CALLBACK_IGNORED (why and event)
+    else SENDING, SENT, or RETRY_SCHEDULED
+        D->>D: update: final status, reason, finalized_at = now, sent_at = coalesce(sent_at, now), provider_message_id (if unused), version + 1 where id, provider, status in (SENDING, SENT, RETRY_SCHEDULED)
+        D->>D: audit DELIVERED or FAILED, outcome metric after commit
     end
     H-->>V: 200
 ```
@@ -581,7 +580,7 @@ nms:
 |---|---|
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
-| Health | `/actuator/health` (database only; the worker is not part of health) |
+| Health | `/actuator/health`: Spring Boot defaults (`db`, `diskSpace`, `ping`); the worker is not part of health |
 | Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:

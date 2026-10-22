@@ -28,7 +28,7 @@ Email and SMS vendors accept a message synchronously, then report the real outco
 - Dedupe by state: a callback applies only to a `SENDING`, `SENT`, or `RETRY_SCHEDULED` delivery; repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`. Accepting `SENDING` covers a callback that beats our `SENT` write; accepting `RETRY_SCHEDULED` covers a vendor that accepted an attempt we classified as failed, and cancels the retry (revision below).
 - Responses are `200` for applied and ignored events so vendors do not retry.
 - Webhook auth: shared secret token per provider in `X-Webhook-Token`.
-- One generic callback format for the simulated providers. Real vendor payloads and signatures are mapped inside each provider adapter in production.
+- One generic callback format for the simulated providers: parsed in `api.CallbackRequestValidator`, mapped event -> status in `delivery.DeliveryCallbacks`; provider adapters only send. Production path: a per-provider `CallbackParser` chosen by `WebhookProvider` maps each vendor's payload and verifies its signature (not built).
 
 ## Discussion
 
