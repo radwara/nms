@@ -59,7 +59,7 @@ Milestone PRs widen the focus:
 |---|---|
 | Before code | Acceptance criteria approved; tests written from them |
 | Local | `./mvnw verify`; local git hooks enforce commit message format |
-| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build and non-root check; demo script smoke run (from #13) |
+| CI | Format check, compiler warnings as errors, unit + integration tests, coverage report, secret scan, Docker image build and non-root check; demo smoke run (`scripts/demo.sh` against the built jar in the dev profile) |
 | Dependencies | Dependabot for Maven and GitHub Actions |
 | Review | Independent reviewer + engineer review on every PR |
 | Traceability | `requirements.md` Test column filled per merged requirement |
