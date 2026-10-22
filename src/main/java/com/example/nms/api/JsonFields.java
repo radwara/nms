@@ -5,6 +5,8 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
+import java.util.UUID;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import tools.jackson.databind.JsonNode;
 
@@ -18,6 +20,8 @@ final class JsonFields {
   // Timestamps outside years 1..9999 are rejected: not every database can store them.
   private static final Instant EARLIEST = Instant.parse("0001-01-01T00:00:00Z");
   private static final Instant LATEST = Instant.parse("9999-12-31T23:59:59.999999Z");
+
+  private static final Pattern CODE = Pattern.compile("[A-Za-z0-9_.-]+");
 
   private JsonFields() {}
 
@@ -90,6 +94,46 @@ final class JsonFields {
         property,
         "Must be an ISO-8601 date-time with offset, e.g. 2026-10-21T10:00:00Z");
     return null;
+  }
+
+  static Instant requiredInstant(JsonNode parent, String property, ApiErrors errors) {
+    JsonNode node = parent.get(property);
+    if (node == null || node.isNull()) {
+      errors.add(ErrorCode.FIELD_MISSING, property);
+      return null;
+    }
+    return optionalInstant(parent, property, errors);
+  }
+
+  /** A UUID in canonical form, e.g. {@code 6f1c2a3b-...}. */
+  static UUID requiredUuid(JsonNode parent, String property, ApiErrors errors) {
+    String text = requiredText(parent, property, property, Uuids.TEXT_LENGTH, errors);
+    if (text == null) {
+      return null;
+    }
+    return Uuids.parse(text)
+        .orElseGet(
+            () -> {
+              errors.add(ErrorCode.INVALID_VALUE, property, "Must be a UUID");
+              return null;
+            });
+  }
+
+  /**
+   * Optional code made of letters, digits, {@code _ . -} only, so it can be audited: no free text,
+   * addresses, or content fit.
+   */
+  static String optionalCode(JsonNode parent, String property, int maxLength, ApiErrors errors) {
+    JsonNode node = parent.get(property);
+    if (node == null || node.isNull()) {
+      return null;
+    }
+    String text = requiredText(parent, property, property, maxLength, errors);
+    if (text != null && !CODE.matcher(text).matches()) {
+      errors.add(ErrorCode.INVALID_VALUE, property, "Must contain only letters, digits, _ . -");
+      return null;
+    }
+    return text;
   }
 
   static String tooLong(int maxLength) {
