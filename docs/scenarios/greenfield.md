@@ -17,7 +17,7 @@ Build order (backlog review): #6 -> #7 -> #12 -> #8 -> #9 -> #10 -> #11 -> #13. 
 | #9 Routing | Requested or preferred channels, opt-out and no-address removal, configurable severity escalation (opt-out wins, A-30 baseline), every decision audited | FR-3.1, FR-6.1 |
 | #10 Delivery worker | Per-(status, priority) poll, versioned claim committed before send, simulated providers with dedupe, retry policy, expiry, lease reclaim, metrics, per-attempt trace ids | FR-4.2, FR-5, FR-6.1, NFR-2, NFR-5 |
 | #11 Status, audit, callbacks | Tenant-scoped status and audit APIs, derived `overallStatus`, single callback writer with row lock, simulated vendors calling back over HTTP | FR-2, FR-4.2, FR-4.3, FR-6.1 |
-| #13 E2E, demo, this document | `GreenfieldE2EIT`, `scripts/demo.sh` in CI, traceability matrix filled | SC-1, D-1, D-3, D-5, FR-6.2 |
+| #13 E2E, demo, this document | `GreenfieldE2EIT`, `scripts/demo.sh` in CI, traceability matrix filled; milestone review: ArchUnit rules (shared packages, single callback writer, no cycles), architecture and ADR drift fixed | SC-1, D-1, D-3, D-5, FR-6.2 |
 
 Review findings for later issues were folded into their bodies as "(added from #N review)" criteria, e.g. 12 carry-overs from the #7 reviews alone.
 
@@ -34,7 +34,7 @@ One branch and PR per issue; implementation by an implementer subagent from an o
 | [#27](https://github.com/radwara/nms/pull/27#issuecomment-6325765783) | #9 | 10 | Bug, performance | 6 | 3 | 1 engineer decision, 2 declined | 153 + 165 |
 | [#32](https://github.com/radwara/nms/pull/32#issuecomment-6328806265) | #10 | 19 | Bug, architecture, performance | 12 | 10 | 1 declined, 1 carried to #11 | 224 + 212 |
 | [#34](https://github.com/radwara/nms/pull/34#issuecomment-6332101203) | #11 | 18 | Bug, general | 11 | 7 | 2 engineer decisions, 1 documented limitation, 1 carried to #14 | 270 + 245 |
-| #13 | #13 | - | Pending; widened to code vs `architecture.md` drift and spec coverage | - | - | Record on the PR | 270 + 249 |
+| #35 | #13 | 14 | Architecture drift (code vs `architecture.md`, ADRs), grader review (README, demo, traceability) | 34 | 34 | Record on the PR | 273 + 249 |
 
 Total for #6-#11: 81 findings, 58 fixed before merge.
 
@@ -58,7 +58,7 @@ Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are li
 
 | Layer | Evidence |
 |---|---|
-| Unit + integration tests | 270 unit + 249 integration, green (`./mvnw verify`); 96.2% line coverage locally (JaCoCo, unit + IT merged), shown in each CI run summary |
+| Unit + integration tests | 273 unit + 249 integration, green (`./mvnw verify`); 96.2% line coverage locally (JaCoCo, unit + IT merged), shown in each CI run summary |
 | End to end | `GreenfieldE2EIT`: real server, background poller, simulated vendors calling back over HTTP; HTTP API only. Happy path (`SENT` then `DELIVERED` per channel), retry (`flaky2`: 3 attempts, then delivered), duplicate (200 replay, `duplicateSubmissions` 1), bounce (`FAILED` / `BOUNCED`), status and audit read back |
 | Leak check | Same test: every audit row and all captured logs of the run contain no subject, body, email, phone, API key, or Idempotency-Key |
 | Demo | `scripts/demo.sh`: the same flows plus a 4001 and a 401, polling with a timeout; CI runs it against the built jar (dev profile) |
