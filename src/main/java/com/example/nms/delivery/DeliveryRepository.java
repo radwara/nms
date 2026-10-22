@@ -39,6 +39,9 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("now") Instant now,
       Limit limit);
 
+  /** A notification's deliveries, one per channel. */
+  List<Delivery> findByNotificationIdOrderByChannel(UUID notificationId);
+
   /** {@code SENDING} rows whose lease started before {@code claimedBefore} (crashed mid-send). */
   @Query(
       """
