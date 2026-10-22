@@ -39,7 +39,7 @@ public class DeliveryCallbacks {
   /** Failure reasons stored for callback events. */
   static final String BOUNCED = "BOUNCED";
 
-  static final String CALLBACK_FAILED = "CALLBACK_FAILED";
+  static final String PROVIDER_FAILED = "PROVIDER_FAILED";
 
   /** Ignored-callback details; the event name is appended. */
   static final String LATE_AFTER_EXPIRY = "late after expiry";
@@ -192,7 +192,7 @@ public class DeliveryCallbacks {
     return switch (event) {
       case DELIVERED -> null;
       case BOUNCED -> BOUNCED;
-      case FAILED -> CALLBACK_FAILED;
+      case FAILED -> PROVIDER_FAILED;
     };
   }
 

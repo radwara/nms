@@ -144,7 +144,7 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 ```
 
 - Required: `deliveryId` (UUID), `providerMessageId` (<= 128), `event`, `occurredAt` (ISO-8601 with offset). Optional `reasonCode`: <= 64 of `A-Z a-z 0-9 _ . -`, so it can be audited. Validation follows Errors (all at once, lenient binding); unknown properties are ignored. The provider is the one the token authenticated, never the body.
-- `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`; `FAILED` to reason `CALLBACK_FAILED` (A-49). The vendor's `reasonCode` goes to the audit detail (`BOUNCED, code MAILBOX_UNAVAILABLE`), not the delivery.
+- `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`; `FAILED` to reason `PROVIDER_FAILED` (A-49). The vendor's `reasonCode` goes to the audit detail (`BOUNCED, code MAILBOX_UNAVAILABLE`), not the delivery.
 - Dedupe by state: only a `SENDING` or `SENT` delivery of the same provider changes (`SENDING` covers a callback that beats our `SENT` write). Everything else is audited `CALLBACK_IGNORED` with the reason and event, e.g. `already DELIVERED; event FAILED`, `provider mismatch; event DELIVERED`, `while RETRY_SCHEDULED; event DELIVERED` (A-47), `late after expiry; event DELIVERED` (A-48).
 - `finalized_at` is our receive time; `occurredAt` is validated but not stored, so vendor clock skew cannot reorder history.
 - Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged at INFO, no audit (no source system to file it under), no counter.
@@ -318,7 +318,7 @@ No status column: overall status is derived from deliveries.
 | `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
 | `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
-| `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `CALLBACK_FAILED`, `RETRIES_EXHAUSTED` |
+| `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `PROVIDER_FAILED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
 | `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id`, `provider`, and `status in (SENDING, SENT)` only (final states never change). Every write increments `version` and sets `updated_at` |
 

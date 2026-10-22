@@ -118,7 +118,7 @@ class NotificationStatusIT {
     assertThat(instant(emailState, "finalizedAt"))
         .isEqualTo(micros(deliveries.findById(email).orElseThrow().getFinalizedAt()));
     assertThat(smsState.get("status").stringValue()).isEqualTo("FAILED");
-    assertThat(smsState.get("reason").stringValue()).isEqualTo("CALLBACK_FAILED");
+    assertThat(smsState.get("reason").stringValue()).isEqualTo("PROVIDER_FAILED");
     assertThat(instant(smsState, "finalizedAt"))
         .isEqualTo(micros(deliveries.findById(sms).orElseThrow().getFinalizedAt()));
   }

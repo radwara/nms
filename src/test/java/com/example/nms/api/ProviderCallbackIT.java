@@ -63,7 +63,7 @@ class ProviderCallbackIT {
       value = {
         "DELIVERED, DELIVERED, null",
         "BOUNCED, FAILED, BOUNCED",
-        "FAILED, FAILED, CALLBACK_FAILED"
+        "FAILED, FAILED, PROVIDER_FAILED"
       })
   void callbackForASentDeliveryIs200AndApplied(String event, DeliveryStatus status, String reason) {
     Delivery sent = sent();

@@ -82,7 +82,7 @@ class SimulatedCallbacksIT {
     }
     assertThat(reasons(status(ids.get("user-bounce")))).containsExactly("BOUNCED");
     assertThat(reasons(status(ids.get("user-cb-failed"))))
-        .containsExactly("CALLBACK_FAILED", "CALLBACK_FAILED");
+        .containsExactly("PROVIDER_FAILED", "PROVIDER_FAILED");
     assertThat(overall(ids.get("user-silent"))).isEqualTo("AWAITING_CONFIRMATION");
     assertThat(auditTypes(ids.get("user-ok")))
         .filteredOn(type -> type.equals("DELIVERED"))

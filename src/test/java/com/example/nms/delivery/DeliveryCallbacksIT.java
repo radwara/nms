@@ -83,7 +83,7 @@ class DeliveryCallbacksIT {
         "DELIVERED | DELIVERED | null            | 250                 | DELIVERED code 250",
         "BOUNCED   | FAILED    | BOUNCED         | MAILBOX_UNAVAILABLE |"
             + " FAILED BOUNCED, code MAILBOX_UNAVAILABLE",
-        "FAILED    | FAILED    | CALLBACK_FAILED | null                | FAILED CALLBACK_FAILED"
+        "FAILED    | FAILED    | PROVIDER_FAILED | null                | FAILED PROVIDER_FAILED"
       })
   void callbackForASentDeliveryAppliesTheFinalStateAuditsAndCounts(
       CallbackEvent event,
