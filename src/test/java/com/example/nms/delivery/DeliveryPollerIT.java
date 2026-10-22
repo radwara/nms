@@ -22,9 +22,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * #10: with the worker enabled, the scheduled poller (default 500ms interval, batch 20) sends
- * without anyone calling it, and drains a backlog without waiting an interval per batch.
+ * without anyone calling it, and drains a backlog without waiting an interval per batch. Both tests
+ * share one context and send 1,001 EMAIL from one source within seconds, so the EMAIL rate limit is
+ * raised well above that (#46).
  */
-@SpringBootTest(properties = "nms.worker.enabled=true")
+@SpringBootTest(properties = {"nms.worker.enabled=true", "nms.rate-limit.per-source.EMAIL=10000"})
 class DeliveryPollerIT {
 
   private static final int BACKLOG = 1_000;

@@ -13,7 +13,9 @@ Requires Java 21. No other installs.
 ./mvnw spring-boot:run   # http://localhost:8080/actuator/health
 ```
 
-Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
+Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Outbound sends are rate limited per source system and channel (`nms.rate-limit.*`: EMAIL 600, SMS 60, other channels 30 per minute; ADR-0007). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
+
+Kafka mode (ADR-0008, off by default; needs a broker): `NMS_KAFKA_ENABLED=true SPRING_KAFKA_BOOTSTRAP_SERVERS=host:9092 ./mvnw spring-boot:run`. EMAIL first dispatch then goes through topic `nms.delivery.email`; the poller sends anything Kafka missed after `nms.kafka.poller-grace` (30s). Tests use an in-JVM broker; no install needed.
 
 ## Docker
 
@@ -245,4 +247,4 @@ How to tell who did what: all GitHub posts come from one account. PR sections an
 - Decisions: [`docs/adr/`](docs/adr/)
 - Requirements and traceability: [`docs/requirements.md`](docs/requirements.md); assumptions: [`docs/ambiguity-log.md`](docs/ambiguity-log.md)
 - Process: [`docs/process.md`](docs/process.md); agent rules: [`AGENTS.md`](AGENTS.md)
-- Scenarios: [`greenfield.md`](docs/scenarios/greenfield.md), [`brownfield.md`](docs/scenarios/brownfield.md), [`ambiguous.md`](docs/scenarios/ambiguous.md)
+- Scenarios: [`greenfield.md`](docs/scenarios/greenfield.md), [`brownfield.md`](docs/scenarios/brownfield.md), [`brownfield-2.md`](docs/scenarios/brownfield-2.md), [`ambiguous.md`](docs/scenarios/ambiguous.md)

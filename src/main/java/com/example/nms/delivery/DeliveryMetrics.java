@@ -16,6 +16,14 @@ class DeliveryMetrics {
 
   static final String ACCEPTED = "ACCEPTED";
 
+  /** {@code reason} of a delivery deferred by the outbound rate limit (ADR-0007). */
+  static final String RATE_LIMITED = "rate_limited";
+
+  /** {@code outcome} of a Kafka publish (ADR-0008). */
+  static final String PUBLISHED = "ok";
+
+  static final String PUBLISH_FAILED = "failed";
+
   private final MeterRegistry registry;
   private final AtomicInteger due = new AtomicInteger();
   private final Timer pollTimer;
@@ -49,6 +57,27 @@ class DeliveryMetrics {
         .tag("status", status.name())
         .register(registry)
         .increment();
+  }
+
+  /**
+   * {@code count} due deliveries' next attempt moved without a claim; {@code reason} is a constant.
+   */
+  void deferred(Channel channel, String reason, int count) {
+    Counter.builder("nms.delivery.deferred")
+        .description("Due deliveries deferred without a claim, by reason")
+        .tag("channel", channel.name())
+        .tag("reason", reason)
+        .register(registry)
+        .increment(count);
+  }
+
+  /** {@code count} EMAIL delivery ids published to Kafka, or not; {@code outcome} is a constant. */
+  void published(String outcome, int count) {
+    Counter.builder("nms.kafka.published")
+        .description("EMAIL delivery ids published to Kafka after commit, by outcome")
+        .tag("outcome", outcome)
+        .register(registry)
+        .increment(count);
   }
 
   /** Times one poll ({@code nms.worker.poll}). */

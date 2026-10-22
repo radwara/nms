@@ -64,6 +64,19 @@ class SchemaMigrationIT {
             "created_at");
   }
 
+  /** #51: V4 extends the poll index with the {@code created_at} tiebreak of the poll's ORDER BY. */
+  @Test
+  void pollIndexCoversTheCreatedAtTiebreak() {
+    assertThat(Arrays.stream(flyway.info().applied()).map(m -> m.getVersion().getVersion()))
+        .contains("4");
+    assertThat(
+            jdbc.queryForList(
+                "select column_name from information_schema.index_columns"
+                    + " where index_name = 'ix_delivery_poll' order by ordinal_position",
+                String.class))
+        .containsExactly("status", "priority", "next_attempt_at", "created_at");
+  }
+
   @Test
   void hibernateValidatesInsteadOfGeneratingSchema() {
     assertThat(environment.getProperty("spring.jpa.hibernate.ddl-auto")).isEqualTo("validate");

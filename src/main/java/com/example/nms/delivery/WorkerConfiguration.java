@@ -11,12 +11,17 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 
 @Configuration(proxyBeanMethods = false)
-@EnableConfigurationProperties(WorkerProperties.class)
+@EnableConfigurationProperties({WorkerProperties.class, RateLimitProperties.class})
 class WorkerConfiguration {
 
   @Bean
   Jitter jitter() {
     return Jitter.uniform();
+  }
+
+  @Bean
+  RateLimiter rateLimiter(RateLimitProperties properties) {
+    return new FixedWindowRateLimiter(properties);
   }
 
   @Bean

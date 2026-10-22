@@ -156,13 +156,33 @@ class DeliveryQueueIT {
     long perPriority =
         scanCount(
             "select id from delivery where status = 'PENDING' and priority = 2"
-                + " and next_attempt_at <= ? order by next_attempt_at limit 20");
+                + " and next_attempt_at <= ?"
+                + " order by status, priority, next_attempt_at, created_at limit 20");
     long orderedByPriority =
         scanCount(
             "select id from delivery where status = 'PENDING'"
                 + " and next_attempt_at <= ? order by status, priority, next_attempt_at limit 20");
     assertThat(perPriority).isLessThanOrEqualTo(10);
     assertThat(orderedByPriority).isGreaterThan(FUTURE_HIGH_ROWS);
+  }
+
+  /**
+   * #51: with the {@code created_at} tiebreak (#46) the poll index covers the whole ORDER BY, so a
+   * poll reads about one batch, not every due row of its status and priority.
+   */
+  @Test
+  void pollReadsAboutOneBatchOfALargeDueRange() {
+    insertPending(DUE_ROWS, Priority.NORMAL, NOW.minusSeconds(1));
+
+    assertThat(deliveries.findDue(DeliveryStatus.PENDING, Priority.NORMAL, NOW, Limit.of(20)))
+        .hasSize(20);
+    // The SQL of DeliveryRepository.findDue.
+    long read =
+        scanCount(
+            "select id from delivery where status = 'PENDING' and priority = 1"
+                + " and next_attempt_at <= ?"
+                + " order by status, priority, next_attempt_at, created_at limit 20");
+    assertThat(read).isLessThanOrEqualTo(21);
   }
 
   @Test
@@ -179,6 +199,8 @@ class DeliveryQueueIT {
   }
 
   private static final int FUTURE_HIGH_ROWS = 2_000;
+
+  private static final int DUE_ROWS = 5_000;
 
   private static final Pattern SCAN_COUNT = Pattern.compile("scanCount: (\\d+)");
 

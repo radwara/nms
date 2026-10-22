@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -31,6 +32,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.Limit;
@@ -39,9 +41,10 @@ import org.springframework.stereotype.Component;
 /**
  * Sends due deliveries (ADR-0004). One poll reads each due status separately, merges by priority
  * then due time, and works the best {@code batch-size} rows one by one: expire or fail a row that
- * cannot be sent (no claim), or claim (committed) then send outside any transaction then write the
- * outcome (conditional on the claim's version). Each row runs under its own trace id. Addresses and
- * content are never logged.
+ * cannot be sent (no claim), defer a rate-limited source's due rows on that channel to the next
+ * window (one set-based postpone, no claim, ADR-0007), or claim (committed) then send outside any
+ * transaction then write the outcome (conditional on the claim's version). Each row runs under its
+ * own trace id. Addresses and content are never logged.
  */
 @Component
 public class DeliveryWorker {
@@ -64,6 +67,7 @@ public class DeliveryWorker {
   private static final Comparator<Delivery> BEST_FIRST =
       Comparator.comparing((Delivery d) -> d.getPriority().code())
           .thenComparing(Delivery::getNextAttemptAt)
+          .thenComparing(Delivery::getCreatedAt)
           .thenComparing(Delivery::getId);
 
   private final DeliveryRepository deliveries;
@@ -75,8 +79,14 @@ public class DeliveryWorker {
   private final DeliveryMetrics metrics;
   private final Clock clock;
   private final WorkerProperties properties;
+  private final RateLimiter rateLimiter;
+
+  /** Kafka fast path on (ADR-0008); {@code null} when off. */
+  private final FirstDispatchGrace grace;
+
   private volatile boolean stopping;
 
+  /** Without a rate limit. */
   DeliveryWorker(
       DeliveryRepository deliveries,
       NotificationRepository notifications,
@@ -87,6 +97,58 @@ public class DeliveryWorker {
       DeliveryMetrics metrics,
       Clock clock,
       WorkerProperties properties) {
+    this(
+        deliveries,
+        notifications,
+        recipients,
+        providers,
+        outcomes,
+        retryPolicy,
+        metrics,
+        clock,
+        properties,
+        RateLimiter.ALLOW_ALL);
+  }
+
+  /** Without a grace window (Kafka off). */
+  DeliveryWorker(
+      DeliveryRepository deliveries,
+      NotificationRepository notifications,
+      RecipientRepository recipients,
+      ProviderRegistry providers,
+      DeliveryOutcomes outcomes,
+      RetryPolicy retryPolicy,
+      DeliveryMetrics metrics,
+      Clock clock,
+      WorkerProperties properties,
+      RateLimiter rateLimiter) {
+    this(
+        deliveries,
+        notifications,
+        recipients,
+        providers,
+        outcomes,
+        retryPolicy,
+        metrics,
+        clock,
+        properties,
+        rateLimiter,
+        Optional.empty());
+  }
+
+  @Autowired
+  DeliveryWorker(
+      DeliveryRepository deliveries,
+      NotificationRepository notifications,
+      RecipientRepository recipients,
+      ProviderRegistry providers,
+      DeliveryOutcomes outcomes,
+      RetryPolicy retryPolicy,
+      DeliveryMetrics metrics,
+      Clock clock,
+      WorkerProperties properties,
+      RateLimiter rateLimiter,
+      Optional<FirstDispatchGrace> grace) {
     this.deliveries = deliveries;
     this.notifications = notifications;
     this.recipients = recipients;
@@ -96,13 +158,15 @@ public class DeliveryWorker {
     this.metrics = metrics;
     this.clock = clock;
     this.properties = properties;
+    this.rateLimiter = rateLimiter;
+    this.grace = grace.orElse(null);
   }
 
   /**
    * One poll: works up to {@code batch-size} due deliveries and returns how many it finished an
    * attempt or a final state for. Stops between deliveries once the worker is stopping or the
    * thread is interrupted; the rest stay due. Not thread-safe by design; one single-threaded poller
-   * calls it.
+   * calls it. {@link #process(UUID)} may run alongside it.
    */
   public int runOnce() {
     return metrics.timePoll(this::pollOnce).worked();
@@ -140,22 +204,64 @@ public class DeliveryWorker {
             recipients.findAllById(ids(notificationsById.values(), Notification::getRecipientId)),
             Recipient::getId);
 
+    // Keys denied in this poll: their due rows are already deferred; skip them, no more writes.
+    Set<RateLimiter.Key> throttled = new HashSet<>();
     int worked = 0;
     for (Delivery delivery : batch) {
       if (stopping()) {
         log.info("Worker stopping; the rest of the batch stays due");
         break;
       }
-      TraceIds.Scope scope = TraceIds.open(TraceIds.newId());
-      try {
-        if (work(delivery, notificationsById, recipientsById)) {
-          worked++;
-        }
-      } finally {
-        scope.close();
+      if (workTraced(delivery, notificationsById, recipientsById, throttled)) {
+        worked++;
       }
     }
     return new Poll(due.size(), worked);
+  }
+
+  /**
+   * Works one delivery by id through the same per-row path as a poll (ADR-0008 fast path), if it is
+   * {@code PENDING} and due; otherwise does nothing. Safe to call while the poller runs: the
+   * conditional claim lets only one caller send. Returns whether it finished an attempt or a final
+   * state.
+   */
+  public boolean process(UUID deliveryId) {
+    if (stopping()) {
+      return false;
+    }
+    Optional<Delivery> found = deliveries.findById(deliveryId);
+    // Same condition as the PENDING poll. Required: claim checks only the status and version read.
+    if (found.isEmpty() || !firstDispatchDue(found.get(), clock.instant())) {
+      log.debug("Delivery {} not pending and due; skipped", deliveryId);
+      return false;
+    }
+    Delivery delivery = found.get();
+    Map<UUID, Notification> notificationsById =
+        byId(notifications.findAllById(Set.of(delivery.getNotificationId())), Notification::getId);
+    Map<String, Recipient> recipientsById =
+        byId(
+            recipients.findAllById(ids(notificationsById.values(), Notification::getRecipientId)),
+            Recipient::getId);
+    return workTraced(delivery, notificationsById, recipientsById, new HashSet<>());
+  }
+
+  private static boolean firstDispatchDue(Delivery delivery, Instant now) {
+    Instant due = delivery.getNextAttemptAt();
+    return delivery.getStatus() == DeliveryStatus.PENDING && due != null && !due.isAfter(now);
+  }
+
+  /** {@link #work} under a fresh trace id. */
+  private boolean workTraced(
+      Delivery delivery,
+      Map<UUID, Notification> notificationsById,
+      Map<String, Recipient> recipientsById,
+      Set<RateLimiter.Key> throttled) {
+    TraceIds.Scope scope = TraceIds.open(TraceIds.newId());
+    try {
+      return work(delivery, notificationsById, recipientsById, throttled);
+    } finally {
+      scope.close();
+    }
   }
 
   private boolean stopping() {
@@ -173,14 +279,19 @@ public class DeliveryWorker {
 
   /**
    * Due rows, best first: one query per due status and priority, plus reclaimable leases, merged
-   * here by priority then due time.
+   * here by priority then due time. With a grace window (Kafka on), unmoved {@code PENDING} rows of
+   * its channel created within the grace are left to the fast path.
    */
   private List<Delivery> poll(Instant now) {
     Limit limit = Limit.of(properties.batchSize());
     List<Delivery> due = new ArrayList<>();
     for (DeliveryStatus status : DUE_STATUSES) {
       for (Priority priority : Priority.values()) {
-        due.addAll(deliveries.findDue(status, priority, now, limit));
+        due.addAll(
+            grace != null && status == DeliveryStatus.PENDING
+                ? deliveries.findDueOutsideGrace(
+                    status, priority, now, grace.channel(), grace.cutoff(now), limit)
+                : deliveries.findDue(status, priority, now, limit));
       }
     }
     due.addAll(deliveries.findLeaseExpired(now, now.minus(properties.lease()), limit));
@@ -196,11 +307,12 @@ public class DeliveryWorker {
   private boolean work(
       Delivery delivery,
       Map<UUID, Notification> notificationsById,
-      Map<String, Recipient> recipientsById) {
+      Map<String, Recipient> recipientsById,
+      Set<RateLimiter.Key> throttled) {
     Instant now = clock.instant();
     Step step;
     try {
-      step = prepareAndClaim(delivery, notificationsById, recipientsById, now);
+      step = prepareAndClaim(delivery, notificationsById, recipientsById, throttled, now);
     } catch (RuntimeException e) {
       postpone(delivery, now, e);
       return false;
@@ -227,6 +339,7 @@ public class DeliveryWorker {
       Delivery delivery,
       Map<UUID, Notification> notificationsById,
       Map<String, Recipient> recipientsById,
+      Set<RateLimiter.Key> throttled,
       Instant now) {
     Notification notification = notificationsById.get(delivery.getNotificationId());
     if (notification == null) {
@@ -250,7 +363,29 @@ public class DeliveryWorker {
     if (address == null) {
       return failBeforeSend(delivery, notification, NO_ADDRESS, now);
     }
-    if (deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 0) {
+    RateLimiter.Key key =
+        new RateLimiter.Key(notification.getSourceSystem(), delivery.getChannel());
+    if (throttled.contains(key)) {
+      return new Step.Done(false);
+    }
+    Instant windowStart;
+    switch (rateLimiter.acquire(key, now)) {
+      case RateLimiter.Denied denied -> {
+        throttled.add(key);
+        return new Step.Done(defer(key, denied.until(), now));
+      }
+      case RateLimiter.Allowed allowed -> windowStart = allowed.windowStart();
+    }
+    boolean claimed = false;
+    try {
+      claimed =
+          deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 1;
+    } finally {
+      if (!claimed) {
+        rateLimiter.release(key, windowStart);
+      }
+    }
+    if (!claimed) {
       log.debug("Delivery {} claimed by another worker", delivery.getId());
       return new Step.Done(false);
     }
@@ -310,6 +445,27 @@ public class DeliveryWorker {
     } catch (RuntimeException e) {
       log.error("Delivery {} could not be postponed", delivery.getId(), RedactedThrowable.of(e));
     }
+  }
+
+  /**
+   * Rate limited: moves every due row of {@code key} to {@code until} (the window end) with one
+   * set-based postpone, without a claim. Status and attempts unchanged, no audit (not a state
+   * change), DEBUG log only. Returns {@code false}: no attempt or final state was written.
+   */
+  private boolean defer(RateLimiter.Key key, Instant until, Instant now) {
+    int moved =
+        deliveries.postponeDue(
+            key.sourceSystem(), key.channel(), now, now.minus(properties.lease()), until);
+    if (moved > 0) {
+      metrics.deferred(key.channel(), DeliveryMetrics.RATE_LIMITED, moved);
+    }
+    log.debug(
+        "Source system {} on {} rate limited; {} due deliveries deferred to {}",
+        key.sourceSystem(),
+        key.channel(),
+        moved,
+        until);
+    return false;
   }
 
   private boolean expire(Delivery delivery, Notification notification, Instant now) {
