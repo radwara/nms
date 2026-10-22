@@ -29,7 +29,7 @@ scripts/demo.sh                                         # terminal 2; NMS_BASE_U
 Nine steps against the HTTP API: health, happy path, routing (requested channel, severity escalation, opt-out), retry, duplicate submission, event dedup (same event and message under a new key is `SUPPRESSED`; a new message for the same event is delivered), bounce, a validation error, an authentication error. Steps 2-7 poll status until final (30 s timeout); each step uses its own `eventId`, and step 6 reuses it on purpose. The script exits non-zero on any unexpected result. CI runs it against the built jar. Excerpt:
 
 ```
-== 3. Routing: CRITICAL adds SMS; an opt-out withholds it (opt-out wins until #15)
+== 3. Routing: CRITICAL adds SMS and overrides an SMS opt-out (A-30)
    POST /api/v1/notifications  key=demo-1792642057-244-routing  -> 202
         user-ok ACCEPTED 51c807e3-...
         user-sms-optout ACCEPTED 059815ec-...
@@ -43,12 +43,12 @@ Nine steps against the HTTP API: health, happy path, routing (requested channel,
         routing: ROUTED SMS: SEVERITY_ESCALATION
    GET  /api/v1/notifications/059815ec-...  -> 200  user-sms-optout  overallStatus=DELIVERED  requestedChannels=none  duplicateSubmissions=0
         EMAIL  DELIVERED  attempts=1
+        SMS  DELIVERED  attempts=1
    GET  /api/v1/notifications/059815ec-.../audit  -> 200
-        ACCEPTED ROUTED(EMAIL) ROUTE_REMOVED(SMS) ROUTE_REMOVED(SMS) QUEUED(EMAIL) SENT(EMAIL)
-        DELIVERED(EMAIL)
+        ACCEPTED ROUTED(EMAIL) ROUTED(SMS) QUEUED(EMAIL) QUEUED(SMS) SENT(EMAIL) SENT(SMS)
+        DELIVERED(EMAIL) DELIVERED(SMS)
         routing: ROUTED EMAIL: PREFERENCE
-        routing: ROUTE_REMOVED SMS: OPTED_OUT
-        routing: ROUTE_REMOVED SMS: SEVERITY_ESCALATION withheld: OPTED_OUT
+        routing: ROUTED SMS: OPT_OUT_OVERRIDDEN_CRITICAL
    OK
 
 == 4. Retry path: user-flaky2, two transient failures (503), then accepted and delivered

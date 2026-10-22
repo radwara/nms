@@ -9,7 +9,7 @@ The `Test` column is filled in as items are implemented; it becomes the traceabi
 |---|---|---|---|
 | SC-1 | Greenfield: submission, recipient + channel selection, async processing, delivery attempts, status retrieval | Greenfield | `SubmitNotificationIT`, `RoutingIT`, `DeliveryWorkerIT`, `NotificationStatusIT`, `SimulatedCallbacksIT` (submit -> send -> callback -> status on a real server), `GreenfieldE2EIT` (every flow over HTTP with the background worker), `scripts/demo.sh` (CI smoke run) |
 | SC-2 | Brownfield: enhancement/correction to the existing system that spans multiple layers | Brownfield | Event-level dedup (#14, `docs/scenarios/brownfield.md`, ADR-0006): schema `SchemaMigrationIT` (V3); intake `EventDedupIT`, `EventDedupDisabledIT`, `EventDedupLookupIT` (index plan on storm data), `ContentHashTest`, `DedupPropertiesTest`, `NotificationTest`, `SubmitStatementsIT` (one lookup); API `SubmitDedupIT`, `SubmitResponseTest`; status `OverallStatusTest`; metrics `IntakeMetricsIT`; race `EventDedupRaceIT`; `scripts/demo.sh` step 6. Behaviour-preserving refactor first, zero test changes |
-| SC-3 | Ambiguous requirement: show clarification, assumptions, and the resulting implementation | Ambiguous | |
+| SC-3 | Ambiguous requirement: show clarification, assumptions, and the resulting implementation | Ambiguous | `docs/scenarios/ambiguous.md`, A-30; `ChannelSelectionTest`, `RoutingIT`, `RoutingPolicyIT`, `SubmitNotificationIT` (CRITICAL override, INFO / WARNING opt-out); `scripts/demo.sh` step 3 |
 
 ## Functional
 

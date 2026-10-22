@@ -72,7 +72,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 
 | ID | Ambiguity | Assumption / decision | Status |
 |---|---|---|---|
-| A-30 | A CRITICAL alert targets a recipient who opted out of the channel the policy wants to use. Which wins? | Worked as scenario 3: options, questions, chosen policy, tests | Open (scenario 3) |
+| A-30 | A CRITICAL alert targets a recipient who opted out of the channel the policy wants to use. Which wins? | CRITICAL overrides opt-out on every channel (`OPT_OUT_OVERRIDDEN_CRITICAL`); INFO / WARNING respect it; a missing address always removes the channel (engineer, PR #43; scenarios/ambiguous.md) | Accepted |
 
 ## Questions for the hiring team
 
