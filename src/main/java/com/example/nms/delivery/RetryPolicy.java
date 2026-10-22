@@ -6,16 +6,18 @@ import java.time.Instant;
 
 /**
  * What follows a failed attempt (A-40 - A-44): retryable categories back off exponentially with
- * full jitter, {@code delay = random(0, base * 2^(attempt - 1))}; {@code RATE_LIMITED} waits for
- * {@code Retry-After} when given, clamped to {@code [0, 1h]}. Every category counts toward the
- * attempt budget. A retry that would fall at or after {@code expiresAt} expires instead.
+ * equal jitter, {@code delay = cap/2 + random(0, cap/2)} where {@code cap = base * 2^(attempt -
+ * 1)}, so every wait is longer than half its bound and waits grow per attempt (base 500ms:
+ * 250-500ms, then 500ms-1s). {@code RATE_LIMITED} waits for {@code Retry-After} when given, clamped
+ * to {@code [0, 60s]}. Every category counts toward the attempt budget. A retry that would fall at
+ * or after {@code expiresAt} expires instead.
  */
 final class RetryPolicy {
 
   static final String RETRIES_EXHAUSTED = "RETRIES_EXHAUSTED";
 
   /** Upper bound for a vendor's {@code Retry-After}, so one response cannot park a delivery. */
-  static final Duration MAX_RETRY_AFTER = Duration.ofHours(1);
+  static final Duration MAX_RETRY_AFTER = Duration.ofSeconds(60);
 
   /** Least a row is postponed after an unexpected error before its claim. */
   static final Duration MIN_POSTPONEMENT = Duration.ofSeconds(1);
@@ -45,15 +47,18 @@ final class RetryPolicy {
       return new Next.Fail(RETRIES_EXHAUSTED);
     }
     Duration delay =
-        failure
-            .retryAfter()
-            .map(RetryPolicy::clampRetryAfter)
-            .orElseGet(() -> jitter.upTo(backoffCap(attempt)));
+        failure.retryAfter().map(RetryPolicy::clampRetryAfter).orElseGet(() -> backoff(attempt));
     Instant at = now.plus(delay);
     if (expiresAt != null && !at.isBefore(expiresAt)) {
       return new Next.Expire();
     }
     return new Next.Retry(at, delay);
+  }
+
+  /** Equal jitter: half the bound, plus a random part of the other half. */
+  private Duration backoff(int attempt) {
+    Duration half = backoffCap(attempt).dividedBy(2);
+    return half.plus(jitter.upTo(half));
   }
 
   /**

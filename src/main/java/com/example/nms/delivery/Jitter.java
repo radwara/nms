@@ -3,7 +3,10 @@ package com.example.nms.delivery;
 import java.time.Duration;
 import java.util.concurrent.ThreadLocalRandom;
 
-/** Random source for backoff jitter; a bean so tests can make retry times deterministic. */
+/**
+ * Random source for the random half of the backoff (equal jitter); a bean so tests can make retry
+ * times deterministic.
+ */
 @FunctionalInterface
 interface Jitter {
 
