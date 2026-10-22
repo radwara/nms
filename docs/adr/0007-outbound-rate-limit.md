@@ -2,7 +2,7 @@
 
 - Status: Accepted (2026-10-22)
 - Issue: #46. Impact analysis: `docs/scenarios/brownfield-2.md`
-- Related: ADR-0004, A-41
+- Related: ADR-0004, A-41, FR-5.2, #47 (concurrent consumer thread)
 
 ## Context
 
@@ -22,13 +22,14 @@ Nothing stops one source system from flooding a channel. NMS only reacts to a ve
 ## Decision
 
 - `DeliveryWorker.prepareAndClaim` asks `RateLimiter.acquire(sourceSystem, channel, now)` after every pre-send check, just before the claim. Every attempt counts (retries, lease reclaims); CRITICAL has no bypass.
-- `FixedWindowRateLimiter`: windows aligned to multiples of `nms.rate-limit.window` since the epoch; one counter per key in a `ConcurrentHashMap`, updated by one atomic `compute` (safe for concurrent callers).
-- Over the limit: the existing conditional `postpone` moves `next_attempt_at` to the window end. Status and attempts unchanged; no audit (not a state change); DEBUG log; `nms.delivery.deferred{channel, reason=rate_limited}`. `expiresAt` stays the only deadline.
-- Limits per source per window, from `application.yml`: EMAIL 600, SMS 60, `default-per-source` 30, window 1m. Validated positive at startup.
+- `FixedWindowRateLimiter`: windows aligned to multiples of `nms.rate-limit.window` since the epoch; one counter per key in a `ConcurrentHashMap`, updated by one atomic `compute` (safe for concurrent callers: #47 adds a consumer thread on the same path). A unit whose claim is lost or throws is released. A clock set back more than one window starts a new window.
+- Over the limit (first denial of a key in a poll): one set-based postpone moves every due row of that key (`PENDING` / `RETRY_SCHEDULED` due, `SENDING` past the lease) to the window end and bumps `version`; the key is skipped for the rest of the batch. Status and attempts unchanged; no audit (not a state change); DEBUG log; `nms.delivery.deferred{channel, reason=rate_limited}` per row. `expiresAt` stays the only deadline. Poll order breaks `next_attempt_at` ties by `created_at` (FIFO within a source).
+- Limits per source per window, from `application.yml` (same defaults in Java): EMAIL 600, SMS 60, `default-per-source` 30, window 1m. Validated positive at startup.
 - Vendor quota stays reactive (429 -> `Retry-After`, A-41).
 
 ## Consequences
 
 - Plus: one source cannot use a channel's whole throughput; others keep sending; no schema change, no new dependency; a throttled delivery keeps its attempts.
-- Minus: counts are per instance and reset on restart (N instances allow N x limit); up to 2 x limit in a burst across a window boundary; under a flood each poll defers the throttled source's due rows, one update each, and they all become due again at the window end; deferral is visible only in the metric and DEBUG log.
-- Production path: a shared counter (Redis, or a database row per key and window) once there is more than one instance; a token bucket if bursts at the boundary matter.
+- Minus: counts are per instance and reset on restart (N instances allow N x limit); up to 2 x limit in a burst across a window boundary; the deferred backlog of a key is re-swept once per window by one UPDATE, since all of it becomes due again at the window end; deferral is visible only in the metric and DEBUG log.
+- Review (#46): the first version postponed one row per denial; with 5,000 rows, limit 600, batch 20 a window took about 250 polls and 4,400 postpones, and other sources went out on the last poll. Replaced by the set-based postpone (measured in `RateLimitFloodIT`: other source on poll 2, one postpone per window).
+- Production path: a shared counter (Redis, or a database row per key and window) once there is more than one instance; a token bucket if bursts at the boundary matter; spread a large deferred backlog over future windows (follow-up); `created_at` in `ix_delivery_poll` on PostgreSQL so the FIFO tiebreak keeps the index-ordered scan.

@@ -1,8 +1,8 @@
 # Brownfield 2: outbound rate limit (impact analysis)
 
-- Issue: #46. Requirements: SC-2, FR-4.5 as named in the issue (spec 4.5; the rate-limit failure class is FR-5.2 in `requirements.md`), NFR-4. Related: A-41.
+- Issue: #46. Requirements: SC-2, FR-5.2 (rate-limit response, spec 4.5), NFR-4. Related: A-41, #47.
 - Baseline: `main` at `e43ed23` (#45 merged), treated as the existing system.
-- Status: implemented on `feat/46-rate-limit`; Execution and Validation below.
+- Status: implemented on `feat/46-rate-limit`; review fixes in section 9; Execution and Validation below.
 
 ## 1. Context and gap
 
@@ -21,10 +21,10 @@ Nothing stops one source system from flooding a channel. NMS only reacts to a pr
 
 - Check in `DeliveryWorker.prepareAndClaim` after every pre-send check (missing rows, expiry, attempts, recipient, adapter, address) and just before the claim. Every attempt counts, retries and lease reclaims included.
 - Window aligned to multiples of `window` since the epoch (UTC). One counter per (source system, channel), replaced when its window passes.
-- Allowed: counted, then claimed. A lost claim (another writer won the row) still uses one unit; negligible on one instance.
-- Over the limit: `deliveries.postpone(id, status, version, windowEnd, now)` (conditional, existing query). Status and `attempt_count` unchanged; not counted as worked; no audit (not a state change); DEBUG log; metric. A deferred row past `expiresAt` expires on its next poll through the existing path, before the check.
+- Allowed: counted, then claimed. A lost claim (another writer won the row) still uses one unit; negligible on one instance. (Superseded by R3: the unit is released.)
+- Over the limit: `deliveries.postpone(id, status, version, windowEnd, now)` (conditional, existing query). (Superseded by R1: one set-based postpone per key.) Status and `attempt_count` unchanged; not counted as worked; no audit (not a state change); DEBUG log; metric. A deferred row past `expiresAt` expires on its next poll through the existing path, before the check.
 - Seam first: package-private `RateLimiter` interface, allow-all in the refactor commit; `FixedWindowRateLimiter` in the feature.
-- Added after this analysis (coordinator, for #47's planned consumer thread on the same per-row path): the limiter is safe for concurrent callers, one atomic `ConcurrentHashMap.compute` per key; a caller with an older `now` counts in the key's current window.
+- Added after this analysis (#47: a Kafka consumer thread will call the same per-row path, `prepareAndClaim`, alongside the poller): the limiter is safe for concurrent callers, one atomic `ConcurrentHashMap.compute` per key; a caller with an older `now` counts in the key's current window.
 
 ## 4. Affected code (at `e43ed23`)
 
@@ -83,6 +83,21 @@ Unchanged, checked:
 - Under a flood, each poll defers the throttled source's due rows one conditional update each, and at the window end they all become due again. Other sources still send: deferred rows leave the due set.
 - Not visible in status or audit (by decision); only the metric and DEBUG log.
 - Vendor-wide quota (all sources together) is still reactive (A-41).
+- Review additions (section 9): with several instances each counts its own units, so the total can reach N x limit; the deferred backlog of a key is re-swept once per window by one UPDATE (all its rows become due together at the window end); spreading the backlog over future windows is a follow-up, not built.
+
+## 9. Review fixes (#46 review: bug-finder, perf check)
+
+Perf check measured the blocker: 5,000 due rows, limit 600, batch 20. Each denial postponed one row, so a window took about 250 polls and 4,400 single-row postpones, and the other source's row went out on the last poll of every window.
+
+| # | Finding | Fix |
+|---|---|---|
+| R1 | Other sources wait behind the throttled backlog (blocker) | First denial of a key in a poll: one set-based `DeliveryRepository.postponeDue(source, channel, now, claimedBefore, windowEnd)` (join `notification` for `source_system`; `PENDING` / `RETRY_SCHEDULED` due, or `SENDING` past the lease, the poll's own conditions; `version + 1`, so an in-flight claim or outcome write on those rows changes nothing). The key is then skipped for the rest of the batch, no more writes. `nms.delivery.deferred` counts rows moved |
+| R2 | No FIFO among rows postponed to the same instant | Tiebreak `created_at` after `next_attempt_at` in `findDue` and `BEST_FIRST`. Every existing test passes unchanged. H2 plan unchanged (5,000 due rows: 5,001 read with either order; H2 already sorts after the index range). PostgreSQL: the extra sort column defeats the index-ordered stop-after-limit scan; production path is `created_at` in `ix_delivery_poll` (schema change, not done) |
+| R3 | A lost or throwing claim used a unit | `RateLimiter.release(key, windowStart)`; `acquire` returns `Allowed(windowStart)` or `Denied(until)`. A release for a passed window changes nothing |
+| R4 | Clock set back kept the old window | `now` more than one window before the key's window starts a new window; smaller skew still counts in the current window (concurrent callers) |
+| R5 | Java defaults differed from `application.yml` | `per-source` not configured at all: EMAIL 600, SMS 60; `default-per-source` 30. When configured, the channels listed |
+
+Not done (follow-up): spread a large deferred backlog over future windows instead of re-sweeping it once per window.
 
 ## Execution
 
@@ -96,6 +111,7 @@ Branch `feat/46-rate-limit` from `e43ed23`.
 | 4 | `9cb3786` feat(delivery): outbound rate limit per source and channel | `RateLimitProperties`, `FixedWindowRateLimiter`, `nms.delivery.deferred`, `application.yml`, tests |
 | 5 | `763703e` feat(delivery): rate limiter safe for concurrent callers | `ConcurrentHashMap.compute`; concurrency test |
 | 6+ | docs | ADR-0007, `architecture.md`, README, `requirements.md`, this section |
+| R | `c44ef1b` fix(delivery): fair rate limit deferral, FIFO order, slot release | Review fixes R1-R5 (section 9) and their tests |
 
 Zero test changes in the refactor commit:
 
@@ -104,7 +120,7 @@ $ git diff --stat b12d368..d1d240e -- src/test
 (empty)
 ```
 
-Greenfield tests changed: `DeliveryPollerIT` (one property, section 6). No assertion changed or removed.
+Greenfield tests changed: `DeliveryPollerIT` (one property, section 6). No assertion changed or removed. The review fixes (incl. the `findDue` order) changed no greenfield test.
 
 ## Validation
 
@@ -113,8 +129,11 @@ Greenfield tests changed: `DeliveryPollerIT` (one property, section 6). No asser
 | `FixedWindowRateLimiterTest` | Under the limit; at the limit deferred to the window end; deferred sends not counted; window reset; keys independent; unlisted channel default; alignment (10s window); older `now` counts in the current window; 8 threads x 50 acquires allow exactly the limit (a non-atomic get/put variant fails it 3 of 3 runs) |
 | `RateLimitPropertiesTest` | Binding; record defaults (1m, 30); zero / negative window, channel limit, default fail startup; unknown channel fails |
 | `RateLimitDefaultsIT` | Shipped `application.yml`: 1m, EMAIL 600, SMS 60, default 30 |
-| `RateLimitIT` (EMAIL limit 1, `MutableClock`) | Same source: one `SENT`, one `PENDING`, attempts 0, due at window end, no audit, no log line at INFO or above, metric +1; another source sends; not sent before the window end, sent at it; a retry is deferred (`RETRY_SCHEDULED`, attempts 1); a row deferred past `expiresAt` expires (`EXPIRED before send`, attempts 0); CRITICAL deferred too |
+| `FixedWindowRateLimiterTest` (review) | Release gives a unit back; release for a passed window ignored; clock set back more than one window starts a new window; exactly one window back counts in the current one |
+| `DeliveryWorkerRateLimitTest` | A lost claim and a throwing claim release their unit (the next row of the key is sent, no postpone); without a release the second row is deferred |
+| `RateLimitFloodIT` (EMAIL limit 5, batch 20, `MutableClock`, Hibernate statement inspector) | 50 due rows of one source, one new row of another per window, 10 windows: the other source is sent on poll 2 (poll 1 in the last window); per window 1 set-based postpone (0 in the last) and 13 `update delivery` statements (5 claims + 5 `SENT` for the flood, 2 for the other source, 1 postpone; 12 in the last); flood rows sent in creation order |
+| `RateLimitIT` (EMAIL limit 1, `MutableClock`) | Same source: one `SENT`, one `PENDING`, attempts 0, due at window end, no audit, no log line at INFO or above, metric +1; another source sends; not sent before the window end, sent at it; a retry is deferred (`RETRY_SCHEDULED`, attempts 1); a row deferred past `expiresAt` expires (`EXPIRED before send`, attempts 0); CRITICAL deferred too; the set-based postpone moves only the key's due rows (`PENDING`, `RETRY_SCHEDULED`, `SENDING` past the lease), not a fresh claim, a future, `SENT`, other-source or other-channel row, and a claim with the polled version then fails |
 
-`./mvnw -B verify`: 336 unit, 285 integration, 0 failures.
+`./mvnw -B verify`: 343 unit, 287 integration, 0 failures (after the review fixes; 336 / 285 before).
 
 Demo (`scripts/demo.sh`, dev-profile jar on port 18080, fresh database): `Demo passed: 9 steps`. Attempts scraped afterwards: EMAIL 10, SMS 8 from `demo-app` (limits 600 / 60); no `nms_delivery_deferred` series.
