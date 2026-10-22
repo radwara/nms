@@ -80,6 +80,10 @@ public class DeliveryWorker {
   private final Clock clock;
   private final WorkerProperties properties;
   private final RateLimiter rateLimiter;
+
+  /** Kafka fast path on (ADR-0008); {@code null} when off. */
+  private final FirstDispatchGrace grace;
+
   private volatile boolean stopping;
 
   /** Without a rate limit. */
@@ -106,7 +110,7 @@ public class DeliveryWorker {
         RateLimiter.ALLOW_ALL);
   }
 
-  @Autowired
+  /** Without a grace window (Kafka off). */
   DeliveryWorker(
       DeliveryRepository deliveries,
       NotificationRepository notifications,
@@ -118,6 +122,33 @@ public class DeliveryWorker {
       Clock clock,
       WorkerProperties properties,
       RateLimiter rateLimiter) {
+    this(
+        deliveries,
+        notifications,
+        recipients,
+        providers,
+        outcomes,
+        retryPolicy,
+        metrics,
+        clock,
+        properties,
+        rateLimiter,
+        Optional.empty());
+  }
+
+  @Autowired
+  DeliveryWorker(
+      DeliveryRepository deliveries,
+      NotificationRepository notifications,
+      RecipientRepository recipients,
+      ProviderRegistry providers,
+      DeliveryOutcomes outcomes,
+      RetryPolicy retryPolicy,
+      DeliveryMetrics metrics,
+      Clock clock,
+      WorkerProperties properties,
+      RateLimiter rateLimiter,
+      Optional<FirstDispatchGrace> grace) {
     this.deliveries = deliveries;
     this.notifications = notifications;
     this.recipients = recipients;
@@ -128,6 +159,7 @@ public class DeliveryWorker {
     this.clock = clock;
     this.properties = properties;
     this.rateLimiter = rateLimiter;
+    this.grace = grace.orElse(null);
   }
 
   /**
@@ -247,14 +279,19 @@ public class DeliveryWorker {
 
   /**
    * Due rows, best first: one query per due status and priority, plus reclaimable leases, merged
-   * here by priority then due time.
+   * here by priority then due time. With a grace window (Kafka on), {@code PENDING} rows of its
+   * channel due within the grace are left to the fast path.
    */
   private List<Delivery> poll(Instant now) {
     Limit limit = Limit.of(properties.batchSize());
     List<Delivery> due = new ArrayList<>();
     for (DeliveryStatus status : DUE_STATUSES) {
       for (Priority priority : Priority.values()) {
-        due.addAll(deliveries.findDue(status, priority, now, limit));
+        due.addAll(
+            grace != null && status == DeliveryStatus.PENDING
+                ? deliveries.findDueOutsideGrace(
+                    status, priority, now, grace.channel(), grace.cutoff(now), limit)
+                : deliveries.findDue(status, priority, now, limit));
       }
     }
     due.addAll(deliveries.findLeaseExpired(now, now.minus(properties.lease()), limit));
