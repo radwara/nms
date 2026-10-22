@@ -26,7 +26,7 @@ The `delivery` table is the queue.
 - Persisted timestamps come from an injected `Clock` truncated to microseconds (database precision).
 - Scheduling is `nextAttemptAt = scheduledAt`; a retry is `nextAttemptAt = now + backoff`.
 - The lease is longer than the provider timeout. A row stuck in `SENDING` past the lease is reclaimable after a crash; the resend reuses the same provider idempotency key (`deliveryId`).
-- Priority is copied onto the delivery as a number so the poll sorts correctly with an index on `(status, priority, next_attempt_at)`.
+- Priority is copied onto the delivery as a number so the poll sorts correctly with an index on `(status, priority, next_attempt_at)` (`created_at` added in V4, #51).
 
 ## Revision (2026-10-21, #13)
 
