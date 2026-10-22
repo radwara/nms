@@ -25,7 +25,7 @@ Email and SMS vendors accept a message synchronously, then report the real outco
 - Callback events: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` is stored as `FAILED` with reason `BOUNCED`.
 - No callback: the delivery stays `SENT` indefinitely. No sweeper invents an outcome.
 - Retries cover only failed send calls (timeout, 5xx, 429). After a vendor `200` nothing is resent; the vendor owns its retries.
-- Dedupe by state: a callback applies only to a `SENDING` or `SENT` delivery; repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`. Accepting `SENDING` covers a callback that beats our `SENT` write.
+- Dedupe by state: a callback applies only to a `SENDING`, `SENT`, or `RETRY_SCHEDULED` delivery; repeats and late events for final deliveries are audited as `CALLBACK_IGNORED`. Accepting `SENDING` covers a callback that beats our `SENT` write; accepting `RETRY_SCHEDULED` covers a vendor that accepted an attempt we classified as failed, and cancels the retry (revision below).
 - Responses are `200` for applied and ignored events so vendors do not retry.
 - Webhook auth: shared secret token per provider in `X-Webhook-Token`.
 - One generic callback format for the simulated providers. Real vendor payloads and signatures are mapped inside each provider adapter in production.
@@ -38,6 +38,12 @@ Email and SMS vendors accept a message synchronously, then report the real outco
 - Independent design review, commissioned by the engineer with over-complication as its focus, found the first version too heavy and racy: a callback-event table, reconciliation of unmatched callbacks (which could lose events between two transactions), and two vendor-specific payload formats. Replaced with matching on our own `deliveryId` and dedupe by state. Engineer chose to fold `BOUNCED` into `FAILED` for simplicity.
 
 Full thread: #4, review record on #5.
+
+## Revision (2026-10-21, #11)
+
+- Engineer decision (A-47): callbacks also apply to `RETRY_SCHEDULED` deliveries. A send we classified as `TIMEOUT` may have been accepted; the vendor's callback is the authoritative outcome. The callback write clears `next_attempt_at` and bumps `version`, so the pending retry's claim fails and nothing is sent twice. `PENDING` (never sent) stays ignored.
+- Engineer decision (A-49): a vendor `FAILED` callback is stored as `FAILED` with reason `PROVIDER_FAILED`; the vendor's `reasonCode` is audit-only.
+- Engineer decision (A-48): a late callback for a delivery that expired after a lease reclaim keeps `EXPIRED` and is audited `CALLBACK_IGNORED`.
 
 ## Consequences
 

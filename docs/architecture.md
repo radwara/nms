@@ -145,7 +145,7 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 
 - Required: `deliveryId` (UUID), `providerMessageId` (<= 128), `event`, `occurredAt` (ISO-8601 with offset). Optional `reasonCode`: <= 64 of `A-Z a-z 0-9 _ . -`, so it can be audited. Validation follows Errors (all at once, lenient binding); unknown properties are ignored. The provider is the one the token authenticated, never the body.
 - `event`: `DELIVERED`, `BOUNCED`, `FAILED`. `BOUNCED` maps to delivery `FAILED` with reason `BOUNCED`; `FAILED` to reason `PROVIDER_FAILED` (A-49). The vendor's `reasonCode` goes to the audit detail (`BOUNCED, code MAILBOX_UNAVAILABLE`), not the delivery.
-- Dedupe by state: only a `SENDING` or `SENT` delivery of the same provider changes (`SENDING` covers a callback that beats our `SENT` write). Everything else is audited `CALLBACK_IGNORED` with the reason and event, e.g. `already DELIVERED; event FAILED`, `provider mismatch; event DELIVERED`, `while RETRY_SCHEDULED; event DELIVERED` (A-47), `late after expiry; event DELIVERED` (A-48).
+- Dedupe by state: only a `SENDING`, `SENT`, or `RETRY_SCHEDULED` delivery of the same provider changes. `SENDING` covers a callback that beats our `SENT` write; `RETRY_SCHEDULED` covers a vendor that accepted an attempt we classified as failed (e.g. `TIMEOUT`): the callback applies and cancels the retry, since the write clears `next_attempt_at` and bumps `version`, so the pending retry's claim fails and nothing is sent again (A-47). Everything else is audited `CALLBACK_IGNORED` with the reason and event, e.g. `already DELIVERED; event FAILED`, `provider mismatch; event DELIVERED`, `while PENDING; event DELIVERED` (never sent), `late after expiry; event DELIVERED` (A-48).
 - `finalized_at` is our receive time; `occurredAt` is validated but not stored, so vendor clock skew cannot reorder history.
 - Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged at INFO, no audit (no source system to file it under), no counter.
 - `delivery.DeliveryCallbacks.apply` is the only callback writer: row lock, conditional update, audit, and (after commit) `nms.deliveries.outcome` in one transaction. The webhook controller only binds and validates.
@@ -320,7 +320,7 @@ No status column: overall status is derived from deliveries.
 | `provider_message_id` | varchar(128) null | Set on `SENT`; unique with `provider` |
 | `failure_reason` | varchar(32) null | Error category or callback reason, e.g. `INVALID_RECIPIENT`, `BOUNCED`, `PROVIDER_FAILED`, `RETRIES_EXHAUSTED` |
 | `sent_at`, `finalized_at`, `created_at`, `updated_at` | timestamp | |
-| `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id`, `provider`, and `status in (SENDING, SENT)` only (final states never change). Every write increments `version` and sets `updated_at` |
+| `version` | bigint | Concurrency token. Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)` only (final states never change). Every write increments `version` and sets `updated_at` |
 
 ### Audit
 
@@ -379,6 +379,8 @@ stateDiagram-v2
     SENT --> FAILED: callback (incl. bounce)
     SENDING --> DELIVERED: callback before our SENT write
     SENDING --> FAILED: callback before our SENT write
+    RETRY_SCHEDULED --> DELIVERED: callback, retry cancelled
+    RETRY_SCHEDULED --> FAILED: callback, retry cancelled
 ```
 
 - `SENT` with no callback stays `SENT` indefinitely. That is the honest state.
@@ -485,7 +487,7 @@ sequenceDiagram
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
-- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id`, `provider`, and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
+- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id`, `provider`, and `status in (SENDING, SENT, RETRY_SCHEDULED)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 - The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
@@ -530,10 +532,10 @@ sequenceDiagram
     else provider differs from the token's
         D->>D: audit CALLBACK_IGNORED (provider mismatch)
     else
-        D->>D: update: final status, reason, finalized_at = now, sent_at = coalesce(sent_at, now), provider_message_id = coalesce(..), version + 1 where id, provider, status in (SENDING, SENT)
+        D->>D: update: final status, reason, finalized_at = now, sent_at = coalesce(sent_at, now), provider_message_id = coalesce(..), version + 1 where id, provider, status in (SENDING, SENT, RETRY_SCHEDULED)
         alt one row updated
             D->>D: audit DELIVERED or FAILED, outcome metric after commit
-        else final, expired, or not sent yet
+        else final, expired, or PENDING (never sent)
             D->>D: audit CALLBACK_IGNORED (why and event)
         end
     end

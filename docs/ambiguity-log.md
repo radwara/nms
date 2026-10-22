@@ -33,7 +33,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-21 | Overall status when some deliveries succeed and some fail | `overallStatus` derived on read, never stored; separate vocabulary from delivery `status` (see architecture.md). Mixed = `PARTIALLY_DELIVERED` (#2) | Accepted |
 | A-22 | Does "delivered" mean all routed channels or recipient reached on any channel? | All routed channels; a failed escalated SMS stays visible at the top level (#2) | Accepted |
 | A-23 | Must audit history be exposed via API? | Not required (4.9 says record). Exposed anyway as `GET /notifications/{id}/audit`; engineer decision (#2) | Accepted |
-| A-24 | Overall status of a notification with no deliveries but a future `scheduledAt` | `NOT_ROUTED`, not `SCHEDULED`: nothing will ever be sent. `SCHEDULED` also requires every delivery still `PENDING` (#11) | Proposed |
+| A-24 | Overall status of a notification with no deliveries but a future `scheduledAt` | `NOT_ROUTED`, not `SCHEDULED`: nothing will ever be sent. `SCHEDULED` also requires every delivery still `PENDING` (engineer decision, #11) | Accepted |
 
 ## Routing (4.3)
 
@@ -63,9 +63,9 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-44 | Permanent rejection vs invalid recipient | Both terminal, recorded with distinct reason codes | Accepted |
 | A-45 | Retry after vendor acceptance? | Never. Retries cover only failed send calls; after a vendor 200 the vendor owns retries; later FAILED/BOUNCED is final (#4) | Accepted |
 | A-46 | Webhook authentication | Shared secret token per provider in `X-Webhook-Token`; vendor signature verification is the production path. Engineer chose this over HMAC to keep the prototype simple (#4) | Accepted |
-| A-47 | Callback for a delivery not yet sent or between retries (`PENDING`, `RETRY_SCHEDULED`), e.g. a vendor that accepted a send we classified as `TIMEOUT` | Not applied; audited `CALLBACK_IGNORED` (`while RETRY_SCHEDULED; event ...`). ADR-0003 applies callbacks to `SENDING`/`SENT` only; the retry resends with the same `deliveryId`, which the vendor dedupes (#11) | Proposed |
-| A-48 | Late callback for a delivery that expired after a lease reclaim (it may have been sent) | Stays `EXPIRED` (final states never change); audited `CALLBACK_IGNORED` with `late after expiry; event ...`, so the vendor's outcome stays in the history (#11, from the #10 review) | Proposed |
-| A-49 | Failure reason for a vendor `FAILED` callback | `CALLBACK_FAILED` (bounce: `BOUNCED`). The vendor's `reasonCode` is restricted to code characters and audited, not stored on the delivery (#11) | Proposed |
+| A-47 | Callback for a delivery not yet sent or between retries (`PENDING`, `RETRY_SCHEDULED`), e.g. a vendor that accepted a send we classified as `TIMEOUT` | `RETRY_SCHEDULED`: applied. The vendor's callback is the authoritative outcome of an attempt it accepted; the write clears `next_attempt_at` and bumps `version`, so the pending retry is never claimed and nothing is sent twice. `PENDING` (never sent): ignored, audited `CALLBACK_IGNORED` (engineer decision, #11; ADR-0003 revision) | Accepted |
+| A-48 | Late callback for a delivery that expired after a lease reclaim (it may have been sent) | Stays `EXPIRED` (final states never change); audited `CALLBACK_IGNORED` with `late after expiry; event ...`, so the vendor's outcome stays in the history (engineer decision, #11) | Accepted |
+| A-49 | Failure reason for a vendor `FAILED` callback | `PROVIDER_FAILED` (bounce: `BOUNCED`). The vendor's `reasonCode` is restricted to code characters and audited only, not stored on the delivery (engineer decision, #11) | Accepted |
 
 ## Ambiguous scenario candidate
 
