@@ -5,7 +5,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.nms.common.Channel;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.Test;
 
 /** #46: a fixed window per (source system, channel), aligned to multiples of the window. */
@@ -81,6 +87,48 @@ class FixedWindowRateLimiterTest {
 
     assertThat(tenSeconds.acquire("billing", Channel.EMAIL, at)).contains(START.plusSeconds(30));
     assertThat(tenSeconds.acquire("billing", Channel.EMAIL, START.plusSeconds(30))).isEmpty();
+  }
+
+  @Test
+  void anOlderInstantIsCountedInTheCurrentWindow() {
+    limiter.acquire("billing", Channel.SMS, END);
+
+    assertThat(limiter.acquire("billing", Channel.SMS, END.minusSeconds(1)))
+        .contains(END.plus(Duration.ofMinutes(1)));
+  }
+
+  @Test
+  void concurrentCallersNeverExceedTheLimitInAWindow() throws Exception {
+    int limit = 100;
+    int threads = 8;
+    int perThread = 50;
+    FixedWindowRateLimiter shared =
+        new FixedWindowRateLimiter(
+            new RateLimitProperties(Duration.ofMinutes(1), Map.of(Channel.EMAIL, limit), 1));
+    CountDownLatch go = new CountDownLatch(1);
+    List<Future<Integer>> allowed = new ArrayList<>();
+    try (ExecutorService pool = Executors.newFixedThreadPool(threads)) {
+      for (int t = 0; t < threads; t++) {
+        allowed.add(
+            pool.submit(
+                () -> {
+                  go.await();
+                  int count = 0;
+                  for (int i = 0; i < perThread; i++) {
+                    if (shared.acquire("billing", Channel.EMAIL, START.plusMillis(i)).isEmpty()) {
+                      count++;
+                    }
+                  }
+                  return count;
+                }));
+      }
+      go.countDown();
+      int total = 0;
+      for (Future<Integer> result : allowed) {
+        total += result.get();
+      }
+      assertThat(total).isEqualTo(limit);
+    }
   }
 
   @Test
