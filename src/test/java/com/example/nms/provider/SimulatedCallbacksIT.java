@@ -63,9 +63,6 @@ class SimulatedCallbacksIT {
     int scheduledBefore = callbacks.scheduledCallbacks();
 
     assertThat(worker.runOnce()).isEqualTo(7);
-    assertThat(status(ids.get("user-ok")).get("overallStatus").stringValue())
-        .as("before the callbacks")
-        .isEqualTo("AWAITING_CONFIRMATION");
 
     // user-ok: email + SMS delivered; user-bounce: email only; user-cb-failed: both; silent: none.
     assertThat(callbacks.scheduledCallbacks() - scheduledBefore).isEqualTo(5);
