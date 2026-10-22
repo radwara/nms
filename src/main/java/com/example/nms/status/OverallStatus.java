@@ -31,14 +31,21 @@ public enum OverallStatus {
   private static final Set<DeliveryStatus> ACTIVE =
       EnumSet.of(DeliveryStatus.PENDING, DeliveryStatus.SENDING, DeliveryStatus.RETRY_SCHEDULED);
 
+  /** {@link #derive(boolean, Instant, Instant, Collection)} for a notification not suppressed. */
+  public static OverallStatus derive(
+      Instant scheduledAt, Instant now, Collection<DeliveryStatus> deliveries) {
+    return derive(false, scheduledAt, now, deliveries);
+  }
+
   /**
    * The first matching rule wins: no deliveries; before {@code scheduledAt} with nothing attempted;
    * anything still active; anything awaiting a callback; then the final mix.
    *
+   * @param suppressed whether the notification itself was suppressed at intake
    * @param scheduledAt the notification's schedule time, may be null
    */
   public static OverallStatus derive(
-      Instant scheduledAt, Instant now, Collection<DeliveryStatus> deliveries) {
+      boolean suppressed, Instant scheduledAt, Instant now, Collection<DeliveryStatus> deliveries) {
     if (deliveries.isEmpty()) {
       return NOT_ROUTED;
     }

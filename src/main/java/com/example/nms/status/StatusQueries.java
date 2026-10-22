@@ -46,6 +46,7 @@ public class StatusQueries {
               List<Delivery> rows = deliveries.findByNotificationIdOrderByChannel(n.getId());
               OverallStatus overall =
                   OverallStatus.derive(
+                      false,
                       n.getScheduledAt(),
                       clock.instant(),
                       rows.stream().map(Delivery::getStatus).toList());

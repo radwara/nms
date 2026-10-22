@@ -47,6 +47,7 @@ public class IntakeService {
   private final NotificationRepository notifications;
   private final RecipientRepository recipients;
   private final RoutingStep routing;
+  private final EventDedup dedup;
   private final AuditRecorder audit;
   private final Clock clock;
   private final Duration retention;
@@ -57,6 +58,7 @@ public class IntakeService {
       NotificationRepository notifications,
       RecipientRepository recipients,
       RoutingStep routing,
+      EventDedup dedup,
       AuditRecorder audit,
       Clock clock,
       IdempotencyProperties properties,
@@ -65,6 +67,7 @@ public class IntakeService {
     this.notifications = notifications;
     this.recipients = recipients;
     this.routing = routing;
+    this.dedup = dedup;
     this.audit = audit;
     this.clock = clock;
     this.retention = properties.retention();
@@ -138,9 +141,15 @@ public class IntakeService {
     if (!violations.isEmpty() || !unknown.isEmpty()) {
       return new Unprocessable(violations, unknown);
     }
+    return create(command, requestHash, existing.isPresent(), now);
+  }
 
+  /** A new submission: claims the key, then writes, audits, and routes its notifications. */
+  private SubmitResult create(
+      SubmitCommand command, String requestHash, boolean expiredRecordExists, Instant now) {
     UUID submissionId = UUID.randomUUID();
-    claimKey(command, requestHash, existing.isPresent(), submissionId, now);
+    claimKey(command, requestHash, expiredRecordExists, submissionId, now);
+    Map<String, UUID> duplicates = dedup.duplicates(command, now);
     List<Notification> created =
         command.recipients().stream()
             .map(recipient -> notification(command, recipient, submissionId, now))
@@ -149,9 +158,11 @@ public class IntakeService {
     // Deliveries reference notifications by a plain column (no association Hibernate could order
     // inserts by), so the notifications go to the database before routing adds deliveries.
     notifications.flush();
+    List<Notification> originals =
+        created.stream().filter(n -> !duplicates.containsKey(n.getRecipientId())).toList();
     // ACCEPTED first, so each notification's history starts with it and routing events follow.
-    created.forEach(n -> audit.accepted(command.sourceSystem(), n.getId(), now));
-    routing.route(created, now);
+    originals.forEach(n -> audit.accepted(command.sourceSystem(), n.getId(), now));
+    routing.route(originals, now);
     afterCommit(
         () ->
             log.info(
