@@ -307,8 +307,9 @@ Seeded recipients:
 | `created_at` | timestamp | |
 | `content_hash` | char(64) null | SHA-256 (lowercase hex) of `{"body","severity","subject"}` written by the shared `JsonMapper`, values as validated (V3, ADR-0006). Null only on rows written before V3, which never match. Never returned, logged, or audited |
 | `duplicate_of` | uuid null | Original's id on a suppressed notification (no deliveries); null on originals. No FK (like `audit_event.notification_id`), so an original can be purged first |
+| `routed` | boolean, default false | Routing created at least one delivery at intake (same transaction). Only routed originals anchor event dedup |
 
-Index `(source_system, event_id, type, recipient_id, content_hash, created_at)` serves the dedup lookup. No status column: overall status is derived from deliveries and `duplicate_of`.
+Index `(source_system, event_id, type, content_hash, duplicate_of, routed, created_at)` serves the dedup lookup (PostgreSQL production variant: partial `where duplicate_of is null and routed`). No status column: overall status is derived from deliveries and `duplicate_of`.
 
 ### Delivery
 
@@ -471,7 +472,7 @@ Replay reads only `(recipientId, id)` pairs by `submissionId` (no entity loads) 
 
 ### Event dedup (ADR-0006)
 
-A recipient is suppressed when an **original** notification with the same `(source_system, event_id, type, recipient_id, content_hash)` was created within the window. A different message for the same event (subject, body, or severity changed) is always delivered.
+A recipient is suppressed when a **routed original** notification (not suppressed, at least one delivery created at intake) with the same `(source_system, event_id, type, recipient_id, content_hash)` was created within the window. Delivered instead: a different message for the same event (subject, body, or severity changed), and any repeat of a `NOT_ROUTED` original (nothing was sent; e.g. a resend after the address or preference is fixed).
 
 ```yaml
 nms:
@@ -482,17 +483,20 @@ nms:
 
 - Window: `created_at > now - window` (strict), from the original's submission time, not `scheduledAt`. Suppressed rows never anchor, so a source resending every hour is not suppressed forever; `duplicate_of` always points at an original.
 - Order: live idempotency record (200 replay / 409) and 422 first, then the key is claimed, then dedup. A fully suppressed submission still claims its key, so a retry with that key replays the suppressed outcome (also after the window).
-- The original's delivery outcome is ignored (a `FAILED` or `NOT_ROUTED` original still anchors): retrying failed sends is the worker's job. A caller who wants a fresh send uses a new `eventId`.
+- A `FAILED` or `EXPIRED` original still anchors (asynchronous outcome of an attempted send; retrying is the worker's job); a caller who wants a fresh send uses a new `eventId`. A `NOT_ROUTED` original does not (engineer decision D3, #41 review).
+- `routed` is set in the submit transaction: `ChannelRouter` calls `Notification.markRouted()` and intake persists it with one bulk update, so the lookup needs no join into `delivery`.
+- Lookup: one query per submission on `(source_system, event_id, type, content_hash, duplicate_of is null, routed, created_at > since)`, recipients matched in memory (no `recipient_id in (:ids)`), timed by `nms.dedup.lookup`. Suppressed repeats and unrouted rows are skipped by the index, not read (`EventDedupLookupIT`). Verified on H2 only; on PostgreSQL use a partial index `where duplicate_of is null and routed`, built `concurrently` in its own non-transactional migration (H2 has no partial indexes).
+- `enabled` and `window` are read at startup: a change takes effect on restart.
 - Not part of the message: `channels`, `priority`, `scheduledAt`, `expiresAt`. A resend that only adds a channel is suppressed.
 - Suppressed rows keep `subject` / `body` (columns stay `not null`): one extra content copy, never read. Production path: clear it with the "clear `body` once final" path.
 - `content_hash` is written even when dedup is disabled, so turning it back on works at once.
 - `nms.dedup.window` is independent of `nms.idempotency.retention` (A-36). With the defaults a key expires after the window, so a reused key cannot suppress; if `window > retention`, a key reused after retention can be suppressed (consistent, not rejected at startup).
 
 Limitations:
-- Race: two submissions of the same event and message under different keys that commit concurrently both pass the lookup and both are delivered (fails open: greenfield behaviour, never a lost notification; pinned by `EventDedupRaceIT`). A window cannot be a unique constraint. Production path: `pg_advisory_xact_lock(hash(key))` per recipient in sorted key order, with `lock_timeout` set; lock failures need their own handling, since today a `PessimisticLockingFailureException` maps to 409 / 4092 and a lost unique claim to 500.
-- A resend with reworded text is not caught (safe direction: a possible extra message).
+- Race: two submissions of the same event and message under different keys that commit concurrently both pass the lookup and both are delivered (fails open: one extra message, greenfield behaviour; it never suppresses a different message; pinned by `EventDedupRaceIT`). A window cannot be a unique constraint. Production path: `pg_advisory_xact_lock(hash(key))` per recipient in sorted key order, with `lock_timeout` set; lock failures need their own handling, since today a `PessimisticLockingFailureException` maps to 409 / 4092 and a lost unique claim to 500.
+- A resend with reworded text is not caught: it is delivered as a possible extra message.
 - Rows written before V3 have no hash and never anchor: in the first window after deploy a resend of a pre-deploy event is delivered.
-- Code rollback after suppressed rows exist: old code reads them as `NOT_ROUTED` and a same-key replay reports them `ACCEPTED`. Turn dedup off (`NMS_DEDUP_ENABLED=false`) instead of rolling back code.
+- Code rollback: the schema is forward-only, so a rollback keeps `V3__event_dedup.sql` (removing an applied migration fails Flyway validate); old code ignores the new columns. Suppressed rows then read as `NOT_ROUTED` and a same-key replay reports them `ACCEPTED`. Turn dedup off (`NMS_DEDUP_ENABLED=false`) instead of rolling back code.
 
 ### Deliver
 
@@ -616,14 +620,14 @@ nms:
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health`: Spring Boot defaults (`db`, `diskSpace`, `ping`); the worker is not part of health |
-| Metrics | `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
+| Metrics | `nms.dedup.lookup` timer per dedup query; `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
 - `nms.deliveries.due` above 0 with no increase in `nms.delivery.attempts`: the poller has stopped (the gauge keeps its last value).
 - Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
-- Suppression ratio `nms.notifications.submitted{outcome="suppressed"} / sum(nms.notifications.submitted)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. Check the `SUPPRESSED` audit events (`duplicate of <id>`) of that source; if dedup is wrong, set `NMS_DEDUP_ENABLED=false` (no data change, takes effect on restart). The after-commit log line `Submission <id> accepted: <n> notifications, <m> suppressed, for source system <s>` gives the per-submission split.
+- Suppression ratio `nms.notifications.submitted{outcome="suppressed"} / sum(nms.notifications.submitted)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. Check the `SUPPRESSED` audit events (`duplicate of <id>`) of that source; if dedup is wrong, set `NMS_DEDUP_ENABLED=false` (no data change, takes effect on restart). A rising `nms.dedup.lookup` p99 means the lookup is reading more rows than it should (check the index plan). The after-commit log line `Submission <id> accepted: <n> notifications, <m> suppressed, for source system <s>` gives the per-submission split.
 
 ## Scaling path (not built)
 
@@ -636,7 +640,7 @@ What to alert on:
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
 | Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
 | Lock waits | H2 `LOCK_TIMEOUT` (default 2 s) triggers 409/4092 for a racing retry | Set PostgreSQL `lock_timeout` (it waits forever by default) so the 4092 path engages |
-| Event dedup race | Documented: concurrent repeats under different keys both pass | `pg_advisory_xact_lock` per dedup key, sorted, with its own lock-failure handling; dedup index built `concurrently`, partial `where duplicate_of is null` |
+| Event dedup race | Documented: concurrent repeats under different keys both pass | `pg_advisory_xact_lock` per dedup key, sorted, with its own lock-failure handling; dedup index partial `where duplicate_of is null and routed`, built `concurrently` in its own migration |
 
 ## Out of scope
 
