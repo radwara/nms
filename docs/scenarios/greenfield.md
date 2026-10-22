@@ -1,7 +1,7 @@
 # Greenfield: notification service from an empty repo
 
 - Issues: #6-#13 (milestone Greenfield). Requirements: SC-1, FR-1 - FR-6, NFR-1 - NFR-6, D-1.
-- Before code: requirements, ambiguity log, architecture, and ADR-0001 - ADR-0005 merged (#3, #5); backlog reviewed independently and re-scoped before #6 ([backlog review](https://github.com/radwara/nms/issues/6#issuecomment-6308373952)).
+- Before code: requirements and ambiguity log at bootstrap (`9d46fb9`); architecture and ADR-0001 - ADR-0005 merged via #3, #5; backlog reviewed independently and re-scoped before #6 ([backlog review](https://github.com/radwara/nms/issues/6#issuecomment-6308373952)).
 - Result: submit -> route -> queue -> send with retries -> callback -> status and audit, runnable with `scripts/demo.sh`. Tag `v0.1.0-greenfield` after #13 merges.
 
 ## 1. Decomposition
@@ -46,6 +46,11 @@ Total for #6-#11: 81 findings, 58 fixed before merge.
 | [#29](https://github.com/radwara/nms/issues/29) Idempotency-Key in logs during races | `found-by:review` (bug finder, reproduced) | #26 | Hibernate JDBC error logger quotes SQL values | Logger off; race ITs assert the key is never logged. Fixed in #26 |
 | [#30](https://github.com/radwara/nms/issues/30) Malformed path value -> 500, value logged | `found-by:review` (bug, architecture, security; real Tomcat) | #25 | Catch-all handler and Boot's `/error` outside the error contract | All framework errors mapped; 16 real-Tomcat tests. Fixed in #25 |
 | [#33](https://github.com/radwara/nms/issues/33) Log-format test depends on test order | `found-by:test` (Linux CI) | #32 | Logback is JVM-global; a later context reconfigured it | Fresh context for log-format tests. Fixed in #32 |
+| [#36](https://github.com/radwara/nms/issues/36) Opt-out silently dropped when no channels requested | `found-by:review` (bug finder) | #27 | Opted-out channels filtered from candidates before the removal audit | All channels are candidates; every skipped channel audited. Fixed in #27 |
+| [#37](https://github.com/radwara/nms/issues/37) Poison rows stall the delivery queue | `found-by:review` (bug finder, probed; architecture) | #32 | Pre-claim failures left rows due at the top of every poll | Finished `FAILED` with a reason without a claim; other pre-claim errors postpone the row. Fixed in #32 |
+| [#38](https://github.com/radwara/nms/issues/38) Unbounded retries when a provider throws or crashes | `found-by:review` (bug finder, probed; architecture) | #32 | Attempt budget checked only after a `Failed` result; reclaims resent unchecked | Exceptions become `TRANSIENT`; budget enforced before every claim. Fixed in #32 |
+| [#39](https://github.com/radwara/nms/issues/39) Callback timestamp earlier than the `SENT` write it lands on | `found-by:review` (bug finder, probed) | #34 | Clock read before the conditional update | Lock the row, then read the clock. Fixed in #34 |
+| [#40](https://github.com/radwara/nms/issues/40) Duplicate vendor message id returns 500 | `found-by:review` (bug finder, probed; general) | #34 | Unique violation on `provider_message_id` | Id copied only when unused; outcome applied, audited `message id conflict`, 200. Fixed in #34 |
 
 Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are listed in the #17 AI-usage note.
 
@@ -58,7 +63,7 @@ Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are li
 | Leak check | Same test: every audit row and all captured logs of the run contain no subject, body, email, phone, API key, or Idempotency-Key |
 | Demo | `scripts/demo.sh`: the same flows plus a 4001 and a 401, polling with a timeout; CI runs it against the built jar (dev profile) |
 | CI gates | Spotless check, `-Werror`, unit + integration tests, JaCoCo artifact, gitleaks, Docker build and non-root check, demo smoke run |
-| Mutation checks | #26: four deliberate breaks (expiry filter, unique-violation handling, `REJECTED` transaction, check order), each caught by its test |
+| Mutation checks | Implementer-reported (#26), each reverted: four deliberate breaks (expiry filter, unique-violation handling, `REJECTED` transaction, check order), each caught by its test |
 | Measured | #26: 100-recipient submit 0 entity loads, batched; #27: 801 inserts in 16 batches; #32: per-priority poll reads 6 rows vs 2,006, 1,000-delivery backlog drains in ~2 s |
 | Traceability | `docs/requirements.md` Test column: every greenfield FR / NFR row filled, untestable ones say why |
 
@@ -67,7 +72,7 @@ Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are li
 | Where | Decision |
 |---|---|
 | Backlog ([#6](https://github.com/radwara/nms/issues/6#issuecomment-6308373952)) | One independent review per PR, wider at milestone PRs; #12 built before #8; scenario doc and leak test moved to #13 |
-| #17 | Reviewers chosen per PR (bug, architecture, performance, general); implementer subagent from #7; CI badge and test/coverage summary |
+| #17 ([AI-usage note](https://github.com/radwara/nms/pull/17)) | Reviewers chosen per PR (bug, architecture, performance, general); implementer subagent from #7; CI badge and test/coverage summary |
 | #26 ([check order](https://github.com/radwara/nms/pull/26#discussion_r4339680007)) | Idempotency lookup before time-based 422s: a retry of an accepted request replays even after `expiresAt` |
 | #26 ([409](https://github.com/radwara/nms/pull/26#discussion_r4339707709)) | Concurrent request on the same key -> 409 / 4092 with `Retry-After`: a client conflict, not a server error |
 | #27 ([double audit](https://github.com/radwara/nms/pull/27#discussion_r4342566572)) | Keep both events when an escalation is withheld after an earlier removal, so each routing decision is recorded |
@@ -87,5 +92,5 @@ Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are li
 | Two concurrent callbacks for different deliveries with the same new `providerMessageId` -> 500 (vendor retries) | Documented (#34 review) |
 | Content stored in plaintext; no purge for idempotency rows or audit | Production path (architecture.md) |
 | `/actuator/prometheus` needs no key in the prototype | Internal management port in production |
-| Real vendor payloads and signatures not mapped | Production work per provider adapter |
+| Real vendor payloads and signatures not mapped: `api.CallbackRequestValidator` parses the one generic format, `DeliveryCallbacks` maps event to status | Production: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built) |
 | Docker image built and checked in CI only | README (#16) |
