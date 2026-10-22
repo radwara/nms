@@ -6,6 +6,7 @@ import static com.example.nms.support.TestEntities.delivery;
 import static com.example.nms.support.TestEntities.notification;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.nms.audit.AuditRecorder;
 import com.example.nms.common.CallbackEvent;
 import com.example.nms.common.Channel;
 import com.example.nms.common.DeliveryStatus;
@@ -23,6 +24,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,6 +43,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * #11: provider callbacks through {@link DeliveryCallbacks}, the only writer of callback outcomes
@@ -55,6 +62,8 @@ class DeliveryCallbacksIT {
   @Autowired private DeliveryOutcomes outcomes;
   @Autowired private NotificationRepository notifications;
   @Autowired private MeterRegistry meters;
+  @Autowired private AuditRecorder audit;
+  @Autowired private TransactionTemplate transactions;
   @Autowired private MutableClock clock;
   @Autowired private JdbcTemplate jdbc;
 
@@ -141,6 +150,48 @@ class DeliveryCallbacksIT {
     assertThat(done.getFailureReason()).isEqualTo("BOUNCED");
     assertThat(done.getProviderMessageId()).isEqualTo("em-1");
     assertThat(history(queued.getId())).containsExactly("FAILED BOUNCED");
+  }
+
+  @Test
+  void callbackRacingACommittingSentWriteIsTimedAfterIt() throws Exception {
+    Notification n = notifications.save(notification("user-ok", Priority.HIGH, NOW, null));
+    Delivery queued = deliveries.save(delivery(n, Channel.EMAIL, clock.instant()));
+    deliveries.claim(queued.getId(), DeliveryStatus.PENDING, 0, clock.instant());
+    Instant sentAt = clock.instant().plusSeconds(1);
+    CountDownLatch written = new CountDownLatch(1);
+    CountDownLatch commit = new CountDownLatch(1);
+    ExecutorService threads = Executors.newFixedThreadPool(2);
+    try {
+      // The worker's SENT write (time sentAt) holds the row lock until it commits.
+      Future<?> worker =
+          threads.submit(
+              () ->
+                  transactions.executeWithoutResult(
+                      tx -> {
+                        assertThat(deliveries.markSent(queued.getId(), 1, "em-1", sentAt)).isOne();
+                        audit.sent(
+                            n.getSourceSystem(), n.getId(), queued.getId(), Channel.EMAIL, sentAt);
+                        written.countDown();
+                        await(commit);
+                      }));
+      await(written);
+      Future<Result> callback =
+          threads.submit(
+              () -> callbacks.apply(callback(queued, EMAIL, CallbackEvent.DELIVERED, null)));
+      Thread.sleep(300); // the callback is now waiting for the row lock
+      clock.advance(Duration.ofSeconds(1)); // time passes until the worker commits
+      commit.countDown();
+      worker.get(5, TimeUnit.SECONDS);
+
+      assertThat(callback.get(5, TimeUnit.SECONDS)).isEqualTo(Result.APPLIED);
+    } finally {
+      threads.shutdownNow();
+    }
+
+    Delivery done = reload(queued);
+    assertThat(done.getSentAt()).isEqualTo(sentAt);
+    assertThat(done.getFinalizedAt()).isAfterOrEqualTo(done.getSentAt());
+    assertThat(history(queued.getId())).containsExactly("SENT", "DELIVERED");
   }
 
   @Test
@@ -244,6 +295,15 @@ class DeliveryCallbacksIT {
     Delivery sent = reload(queued);
     assertThat(sent.getStatus()).isEqualTo(DeliveryStatus.SENT);
     return sent;
+  }
+
+  private static void await(CountDownLatch latch) {
+    try {
+      assertThat(latch.await(5, TimeUnit.SECONDS)).isTrue();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(e);
+    }
   }
 
   private ProviderCallback callback(

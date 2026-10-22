@@ -7,7 +7,9 @@ import com.example.nms.intake.Notification;
 import com.example.nms.intake.NotificationRepository;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.Optional;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -16,12 +18,13 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Applies provider callbacks (ADR-0003): the only way a callback changes a delivery. The write is
- * conditional on {@code id}, {@code provider}, and {@code status in (SENDING, SENT)}, not on the
- * version, so a callback that beats the worker's {@code SENT} write still applies; that write is
- * conditional on the claim's version and then changes nothing. Final states never change: a repeat
- * or late callback is audited {@code CALLBACK_IGNORED}. The write, its audit, and the outcome
- * metric (after commit) belong to one transaction.
+ * Applies provider callbacks (ADR-0003): the only way a callback changes a delivery. The row is
+ * locked before the clock is read, so the callback's time is never before a worker write that
+ * committed first. The write is conditional on {@code id}, {@code provider}, and {@code status in
+ * (SENDING, SENT)}, not on the version, so a callback that beats the worker's {@code SENT} write
+ * still applies; that write is conditional on the claim's version and then changes nothing. Final
+ * states never change: a repeat or late callback is audited {@code CALLBACK_IGNORED}. The write,
+ * its audit, and the outcome metric (after commit) belong to one transaction.
  */
 @Component
 public class DeliveryCallbacks {
@@ -48,6 +51,10 @@ public class DeliveryCallbacks {
     UNKNOWN
   }
 
+  /** States a callback applies to; must match {@link DeliveryRepository#applyCallback}. */
+  private static final Set<DeliveryStatus> APPLICABLE =
+      EnumSet.of(DeliveryStatus.SENDING, DeliveryStatus.SENT);
+
   private final DeliveryRepository deliveries;
   private final NotificationRepository notifications;
   private final AuditRecorder audit;
@@ -69,7 +76,9 @@ public class DeliveryCallbacks {
 
   @Transactional
   public Result apply(ProviderCallback callback) {
-    Optional<Delivery> found = deliveries.findById(callback.deliveryId());
+    // Lock first, then read the clock: a worker SENT write that committed before us has an
+    // earlier time, so finalized_at >= sent_at and the history reads SENT, then the callback.
+    Optional<Delivery> found = deliveries.findForUpdate(callback.deliveryId());
     if (found.isEmpty()) {
       log.info(
           "Callback {} from {} for unknown delivery {}",
@@ -84,6 +93,9 @@ public class DeliveryCallbacks {
     if (!delivery.getProvider().equals(callback.provider())) {
       return ignored(delivery, notification, callback, PROVIDER_MISMATCH, now);
     }
+    if (!APPLICABLE.contains(delivery.getStatus())) {
+      return ignored(delivery, notification, callback, why(delivery.getStatus()), now);
+    }
     DeliveryStatus status =
         callback.event() == CallbackEvent.DELIVERED
             ? DeliveryStatus.DELIVERED
@@ -97,7 +109,7 @@ public class DeliveryCallbacks {
             reason,
             callback.providerMessageId(),
             now);
-    if (updated == 0) {
+    if (updated == 0) { // not expected while the row is locked; kept as the write's own guard
       DeliveryStatus current =
           deliveries.findById(delivery.getId()).map(Delivery::getStatus).orElseThrow();
       return ignored(delivery, notification, callback, why(current), now);

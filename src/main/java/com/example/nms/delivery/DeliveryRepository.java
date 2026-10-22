@@ -2,11 +2,14 @@ package com.example.nms.delivery;
 
 import com.example.nms.common.DeliveryStatus;
 import com.example.nms.common.Priority;
+import jakarta.persistence.LockModeType;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -38,6 +41,14 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("priority") Priority priority,
       @Param("now") Instant now,
       Limit limit);
+
+  /**
+   * The row, locked until the caller's transaction ends ({@code select ... for update}): a callback
+   * reads the clock only after any concurrent worker write has committed.
+   */
+  @Lock(LockModeType.PESSIMISTIC_WRITE)
+  @Query("select d from Delivery d where d.id = :id")
+  Optional<Delivery> findForUpdate(@Param("id") UUID id);
 
   /** A notification's deliveries, one per channel. */
   List<Delivery> findByNotificationIdOrderByChannel(UUID notificationId);
