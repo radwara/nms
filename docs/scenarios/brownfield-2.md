@@ -138,3 +138,82 @@ Greenfield tests changed: `DeliveryPollerIT` (one property, section 6). No asser
 `./mvnw -B verify`: 343 unit, 287 integration, 0 failures (after the review fixes; 336 / 285 before).
 
 Demo (`scripts/demo.sh`, dev-profile jar on port 18080, fresh database): `Demo passed: 9 steps`. Attempts scraped afterwards: EMAIL 10, SMS 8 from `demo-app` (limits 600 / 60); no `nms_delivery_deferred` series.
+
+---
+
+# #47: Kafka fast path for EMAIL dispatch (impact analysis)
+
+- Issue: #47. Requirements: SC-2, NFR scalability. Revisits ADR-0004 (broker named as the production path).
+- Baseline: `main` at `950dcfd` (#46 merged), treated as the existing system.
+
+## 1. Context and gap
+
+Every delivery waits for the next poll (500ms interval, one thread, ADR-0004). The poll is the only dispatch path, so EMAIL latency and throughput are bound to it.
+
+## 2. Engineer decisions (#47, 2026-10-22)
+
+| Decision | Source |
+|---|---|
+| Kafka is the fast path for EMAIL first dispatch; the database stays the source of truth; the poller stays as reconciliation (not a transactional outbox) | Engineer |
+| Grace window: with Kafka on, the poller takes EMAIL first-dispatch rows only once due longer than `nms.kafka.poller-grace` (30s) | Engineer |
+| Retries, lease reclaim and SMS stay with the poller (Kafka has no delayed delivery) | Engineer |
+| Off by default (`nms.kafka.enabled=false`): app, demo, existing tests need no broker | Engineer |
+| Rejected: full outbox; no Kafka code (design note only) | Engineer |
+
+## 3. Design proposal
+
+- Publish: `ChannelRouter` publishes one Spring event per submission with the deliveries it saved (id, channel), inside the submit transaction. A `@TransactionalEventListener(AFTER_COMMIT)` (Kafka on only) sends each EMAIL id to `nms.delivery.email`, key and value = the id. A failed or throwing send is logged by id, counted, and swallowed: the API response is unaffected, the poller sends the row after the grace window. A send that fails at once (broker metadata unavailable after `max.block.ms`) stops the rest of that submission's sends (counted failed), so a broker outage costs a request at most one `max.block.ms`. With no listener (Kafka off) the event does nothing.
+- Consume: `@KafkaListener` calls a new `DeliveryWorker.process(UUID)`: load the row; skip unless `PENDING` and due (same condition as the poll; a `SENT` row must be skipped because `claim` only checks the read status and version); load its notification and recipient; run the existing per-row `work` (checks, rate limit, conditional claim, send, outcome) under a fresh trace id. No new dedup: a duplicate message finds the row no longer `PENDING`, and a race with the poller is decided by the claim (one winner).
+- Poller grace: with Kafka on, the `PENDING` queries exclude EMAIL rows due after `now - grace`; `RETRY_SCHEDULED`, lease reclaim and SMS keep `now`. With Kafka off, `poll()` runs the same `findDue` calls as today. One sibling query (`findDue` plus `and (channel <> :channel or next_attempt_at <= :cutoff)`, same order) is used for `PENDING` when Kafka is on: same index range and stop-after-limit, plus the in-grace EMAIL rows Kafka has not sent yet. Filtering in Java after the existing query was rejected: 20 in-grace EMAIL rows at the front of a priority would hide every newer SMS row behind them until the grace passes (SMS delayed whenever Kafka lags).
+- Seam first: `DeliveriesQueued` event published by the router, and `process(UUID)` extracted from the poll loop; both unused until the feature.
+
+## 4. Affected code (at `950dcfd`)
+
+| File:line | Change |
+|---|---|
+| `routing/ChannelRouter.java:90` | After `saveAll`, publish `DeliveriesQueued` (one per submission) (still in the transaction; intake boundary is `IntakeService.java:91`) |
+| `delivery/DeliveryWorker.java:156-193` | Per-row trace scope and `work` call extracted, shared by the poll loop and `process(UUID)` |
+| `delivery/DeliveryWorker.java:212-223` | `poll()`: `PENDING` uses the grace query when a grace is configured |
+| `delivery/DeliveryWorker.java:109-131` | New constructor with the optional grace; 9- and 10-arg constructors kept (`DeliveryWorkerTest`, `DeliveryWorkerRateLimitTest` call them) |
+| `delivery/DeliveryRepository.java:35-45` | `findDue` unchanged; sibling grace query added |
+| `delivery/DeliveryMetrics.java` | New `nms.kafka.published{outcome}` counter |
+| New `delivery/DeliveriesQueued.java`, `KafkaDispatch*` (properties, configuration, publisher, listener) | All Kafka beans conditional on `nms.kafka.enabled=true` |
+| `pom.xml` | `spring-boot-starter-kafka`; `spring-boot-starter-kafka-test` (embedded KRaft broker, test scope); versions from the Boot 4.1.1 BOM (spring-kafka 4.1.1, kafka 4.2.1) |
+| `resources/application.yml` | `nms.kafka` block; `spring.kafka` producer `max.block.ms`, consumer group and `auto-offset-reset: earliest` |
+
+## 5. Config, metrics, threading, data
+
+```yaml
+nms:
+  kafka:
+    enabled: false      # NMS_KAFKA_ENABLED; broker from SPRING_KAFKA_BOOTSTRAP_SERVERS
+    poller-grace: 30s   # positive; EMAIL first dispatch left to Kafka this long
+```
+
+- Metrics: `nms.kafka.published{outcome=ok|failed}`. Sends and outcomes reuse `nms.delivery.attempts` and `nms.deliveries.outcome`. Consumer lag comes from the Kafka client metrics (Boot binds them to Micrometer) or the broker.
+- Threading: `process` runs on the listener thread alongside the poller thread. `DeliveryWorker` shared state: all fields final and stateless or thread-safe, except `volatile boolean stopping`. Per-poll state (batch, lookup maps, throttled keys) is local to `pollOnce`; `process` uses its own. Collaborators: repositories (each write its own transaction), `DeliveryOutcomes` (stateless, `REQUIRES_NEW`), `RetryPolicy` (immutable; `Jitter` uses `ThreadLocalRandom`), `FixedWindowRateLimiter` (`ConcurrentHashMap.compute`, made safe in #46 for this), `DeliveryMetrics` (Micrometer; the `due` gauge is set by the poller only), `TraceIds` (MDC, thread-local), `SimulatedProvider` (concurrent maps). No new locking needed.
+- Data: **no schema change.** Kafka payload is the delivery id only; no content or addresses.
+- Kafka off: Boot's Kafka auto-configuration creates inert factories (no connection, no `NewTopic`, no listener container); checked by test.
+
+## 6. Greenfield tests that must change
+
+None. Kafka is off by default and `poll()` runs the same queries when off. `DeliveryWorkerTest` and `DeliveryWorkerRateLimitTest` keep their constructors.
+
+## 7. Test plan
+
+| Test | Asserts |
+|---|---|
+| Refactor commit | Full suite green, zero `src/test` diff |
+| Unit (worker, mocks) | Grace cutoff: Kafka on, `PENDING` queries use EMAIL and `now - grace`; `RETRY_SCHEDULED` and lease reclaim use `now`; Kafka off, only `findDue`. `process`: skips non-`PENDING` and not-yet-due rows without a claim; lost claim, no send |
+| Query IT | Grace query: in-grace EMAIL excluded; SMS and past-grace EMAIL returned; FIFO order |
+| Embedded broker IT (grace 60s, poller on) | EMAIL intake -> Kafka -> consumer -> `SENT` well inside the grace; same id published twice sends once; SMS sent by the poller, nothing published |
+| Publish failure IT (no broker, grace 2s, poller on) | Submit still accepted; `published{failed}`; poller sends the row, not before the grace |
+| Kafka off IT | No Kafka listener containers, no publisher bean |
+
+## 8. Limitations
+
+- Not a transactional outbox: a crash between commit and publish, or a failed publish, delays the delivery by the grace window (the poller sends it).
+- The poller still scans EMAIL; it only skips in-grace rows.
+- EMAIL first dispatch that is not due at publish time (scheduled send) or deferred by the rate limit goes out up to one grace window after it becomes due (poller).
+- Publish runs on the request thread after commit; with the broker down a submission waits up to `max.block.ms` (1s) once before its sends fail.
+- One topic, no ordering guarantee needed (each message is independent; the claim arbitrates).
