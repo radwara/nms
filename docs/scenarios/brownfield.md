@@ -1,12 +1,13 @@
 # Brownfield: event-level deduplication (impact analysis)
 
 - Issue: #14. Requirements: SC-2, FR-4.3, FR-4.4. Ambiguity: A-04, A-35, A-36.
-- Status: **Revised after review; engineer decisions recorded below.** No code is written until this document is merged.
-- Baseline: `main` at `be7ce96` (#6-#10, #12 merged); status, audit and callback APIs (#11) merged later at `3161dc7`, and their rows are re-checked against it (F1 decisions, section 4). Re-check this analysis against the `v0.1.0-greenfield` tag before the code PR.
+- Status: **Merged #31; implemented in #41.** Engineer decisions below; D3 changed by the engineer in the #41 review (option B), and the lookup and index revised after the #41 performance review (section 4).
+- Baseline: `main` at `be7ce96` (#6-#10, #12 merged); status, audit and callback APIs (#11) merged later at `3161dc7`, and their rows are re-checked against it (F1 decisions, section 4).
+- Re-check at `v0.1.0-greenfield` (`667e70b`, before the code PR): every file in section 4 exists as described; `GreenfieldE2EIT` and the #13 demo use one `eventId` per flow or step, so neither can suppress another; no greenfield test needed a change (confirmed: the refactor commit has zero test changes and the feature only adds test methods). No finding changed the analysis.
 
 ## 1. Change
 
-A submission that repeats an event **and** its message for a recipient within the window, under a **different** `Idempotency-Key`, is suppressed for that recipient: it gets a notification row but no deliveries, and the suppression shows in the submit response, status, and audit. A different message for the same event is always delivered.
+A submission that repeats an event **and** its message for a recipient within the window, under a **different** `Idempotency-Key`, is suppressed for that recipient when the earlier notification was routed (got at least one delivery) at intake: the repeat gets a notification row but no deliveries, and the suppression shows in the submit response, status, and audit. A different message for the same event, and a repeat of a `NOT_ROUTED` notification, are delivered.
 
 Why: spec 4.4 asks to prevent avoidable duplicate notifications. Greenfield only dedupes by idempotency key, so a source that loses its key (crash before storing it, a batch job rerun) notifies the user again. Two instances emitting the same event *concurrently* are not covered: that is the race in D8.
 
@@ -34,14 +35,14 @@ Code path: `IntakeService.attempt` looks up only `idempotency_record (source_sys
 | c. b + `type` (draft proposal) | Rejected by engineer | Spec 4.1 allows `eventId` to be a correlation id: a different alert reusing it (two fraud alerts for `acct-42` within 24h) would be dropped. A severity upgrade (`WARNING` then `CRITICAL`) would be suppressed (review M3) |
 | c + `nms.dedup.mode: off \| shadow \| enforce` (review H1) | Rejected by engineer | Shadow mode only measures the risk; enforcing option c still drops the second alert. With the content hash a different message is always delivered, so there is nothing to shadow |
 | c + "do not suppress a higher severity" (review M3) | Rejected by engineer | Subsumed: severity is in the hash, so any severity change is delivered |
-| **d. c + `content_hash`** | **Decided** | Fails safe: only an identical message is suppressed |
+| **d. c + `content_hash`** | **Decided** | Only an identical message is suppressed |
 
-Accepted trade-off: a resend with changed text (a corrected subject, a reworded body) is not caught. Safe direction: a possible extra message, never a lost alert.
+Accepted trade-off: a resend with changed text (a corrected subject, a reworded body) is not caught: it is delivered as a possible extra message. What is suppressed: an identical subject, body and severity for the same source, event, type and recipient, within the window, after a routed original, even if that original later `FAILED` or `EXPIRED` (D3).
 
 `content_hash` canonical input:
 - SHA-256, lowercase hex (64 chars), computed once per submission (subject, body, severity are request-level).
 - Input: UTF-8 JSON object `{"body": ..., "severity": ..., "subject": ...}`, keys in that order, written by the shared `JsonMapper` (same approach as `RequestHash`). JSON quoting keeps field boundaries unambiguous (`("ab","c")` != `("a","bc")`).
-- Values exactly as validated: no trimming or case folding (any difference is delivered, the safe direction). `severity` as the enum name.
+- Values exactly as validated: no trimming or case folding (any difference is delivered). `severity` as the enum name.
 - Not in the hash or key: `channels`, `priority`, `scheduledAt`, `expiresAt`. A resend that only adds a channel is the same message and is suppressed. Documented.
 
 Other rationale:
@@ -64,7 +65,7 @@ nms:
     window: ${NMS_DEDUP_WINDOW:24h}      # must be positive; startup fails otherwise
 ```
 
-- Duplicate if an **original** (non-suppressed) notification with the same key has `created_at > now - window` (strict: exactly `window` old is not a duplicate). `now` is the injected `Clock`, truncated to microseconds.
+- Duplicate if a **routed original** (non-suppressed, at least one delivery created at intake; D3) notification with the same key has `created_at > now - window` (strict: exactly `window` old is not a duplicate). `now` is the injected `Clock`, truncated to microseconds.
 - Anchored on the original only: suppressed rows never extend the window, so a source resending every hour is not suppressed forever. Suppressed rows always point at an original (chains are one level deep).
 - The window runs from submission time (`created_at`), not `scheduledAt`.
 
@@ -72,10 +73,11 @@ nms:
 
 | Option | Trade-off |
 |---|---|
-| **a. Suppress whatever the original's delivery outcome** | Decided at intake from intake data only; deterministic |
+| a. Suppress whatever the original's delivery outcome | Proposed. Decided at intake from intake data only; deterministic. A `NOT_ROUTED` original (nothing ever sent) blocks a resend after the address or preference is fixed |
+| **B. Do not suppress if the original is `NOT_ROUTED`; `FAILED` / `EXPIRED` still anchor** | **Changed by engineer in the #41 review** ([review comment](https://github.com/radwara/nms/pull/41#discussion_r4350865614)) |
 | b. Do not suppress if the original `FAILED` / `EXPIRED` / `NOT_ROUTED` | Lets a caller "retry" through dedup; reads delivery state that the worker is changing concurrently |
 
-**a.** Retrying failed sends is the worker's job (bounded retries, FR-5.1). A caller who wants a fresh send uses a new `eventId`.
+**B.** Reason: a `NOT_ROUTED` original sent nothing, so suppressing its resend would drop the only notification; `FAILED` and `EXPIRED` are asynchronous outcomes of an attempted send, and retrying them is the worker's job (bounded retries, FR-5.1). Implementation: `notification.routed` is set in the submit transaction (routing calls `Notification.markRouted()`, intake persists it with one bulk update), so the lookup filters on it without a join into `delivery`. A caller who wants a fresh send of a `FAILED` / `EXPIRED` notification uses a new `eventId`.
 
 ### D4. Precedence
 
@@ -143,7 +145,7 @@ Two submissions with different keys for the same event and message commit concur
 
 | Option | Trade-off |
 |---|---|
-| **a. Document as a limitation** | Fails open: the race produces exactly greenfield behaviour (one duplicate), never a lost notification. Window is one submit transaction (milliseconds) |
+| **a. Document as a limitation** | Fails open: the race produces exactly greenfield behaviour (one extra message); it never suppresses a different message. Window is one submit transaction (milliseconds) |
 | b. `select id from recipient where id in (:ids) order by id for update` before the lookup | One query, H2 + PostgreSQL. Serializes every submission per recipient (not only the same event). Sorted ids avoid deadlocks |
 | c. Claim table on the D1 key, unique; insert or conditional update of an expired claim | Mirrors the idempotency claim; up to 100 conditional writes per submission |
 | d. PostgreSQL `pg_advisory_xact_lock(hash(key))` per recipient | Exact per-event serialization; not available on H2 |
@@ -153,7 +155,7 @@ Caveats for b-d (none applies to a):
 - d: acquire the per-recipient locks in sorted key order, or two overlapping batches deadlock. PostgreSQL waits forever by default, so `lock_timeout` must be set (already a production item for the 4092 path). Hash collisions only over-serialize.
 - c: a lost claim race is a `DataIntegrityViolationException`; the existing handler finds no same-key record and rethrows, so the caller gets **500** unless handled.
 
-**a** for the prototype, with d as the production path (b if H2 parity is required). Recorded in `architecture.md` limitations. Optional: a `RoutingGate` test that pins the limitation (both accepted), so a later serialization change is visible.
+**a** for the prototype, with d as the production path (b if H2 parity is required). Reason: it fails open (an extra message, never a suppressed different one) and needs no new lock handling. Recorded in `architecture.md` limitations. Optional: a `RoutingGate` test that pins the limitation (both accepted), so a later serialization change is visible.
 
 ### D9. Idempotency retention
 
@@ -167,9 +169,9 @@ Caveats for b-d (none applies to a):
 
 | Layer | Change | Files |
 |---|---|---|
-| Schema | `V3__event_dedup.sql`: `alter table notification add column duplicate_of uuid null`; `add column content_hash char(64) null` (null only on pre-V3 rows; every new row writes it); `create index ix_notification_event_dedup on notification (source_system, event_id, type, recipient_id, content_hash, created_at)`. Additive, no backfill: pre-V3 rows are originals but never match (null hash), so they cannot anchor. Production: build the index `concurrently` outside the Flyway transaction; PostgreSQL could use a partial index `where duplicate_of is null` (H2 has none) | new migration only; V1/V2 untouched |
-| Intake | Compute `content_hash` once per submission. After `claimKey`: one projection query `select recipientId, id ... where sourceSystem, eventId, type, contentHash, recipientId in (:ids), createdAt > :since, duplicateOf is null order by createdAt` (earliest original per recipient). Build rows with `contentHash` and `duplicateOf`; `ACCEPTED` for originals, `SUPPRESSED` + `DUPLICATE_EVENT` for duplicates; route originals only. Replay projection adds `duplicateOf`. Lookup and split live in a package-private `EventDedup` class in `intake` (introduced by the refactor commit), so `IntakeService` does not grow and no feature package is added | `IntakeService`, new `EventDedup`, new `ContentHash` (package-private, next to `RequestHash`), `Notification` (new fields; existing constructor kept, overload added), `NotificationRepository`, `SubmittedNotification`, new `DedupProperties` in `IntakeConfiguration` |
-| Routing | None. `RoutingStep.route` already receives "the new notifications"; intake passes only originals. All suppressed -> empty list (existing early return) | none |
+| Schema | `V3__event_dedup.sql`: `alter table notification add column duplicate_of uuid null`; `add column content_hash char(64) null` (null only on pre-V3 rows; every new row writes it); `add column routed boolean default false not null` (D3, #41 review); `create index ix_notification_event_dedup on notification (source_system, event_id, type, content_hash, duplicate_of, routed, created_at)` (revised in the #41 performance review: the first version led with `recipient_id` and filtered `duplicate_of` after the index, so every suppressed repeat was read, 85 ms at 100k rows on H2). Additive, no backfill: pre-V3 rows never match (null hash, not routed). Verified on H2 only. Production (PostgreSQL): a partial index `where duplicate_of is null and routed`, built `concurrently` in its own non-transactional migration (H2 has no partial indexes) | new migration only; V1/V2 untouched |
+| Intake | Compute `content_hash` once per submission. After `claimKey`: one projection query `select recipientId, id ... where sourceSystem, eventId, type, contentHash, duplicateOf is null, routed = true, createdAt > :since order by createdAt` (earliest original per recipient; recipients matched in `EventDedup`, not with `recipient_id in (:ids)`, #41 review), timed by `nms.dedup.lookup`. Build rows with `contentHash` and `duplicateOf`; `ACCEPTED` for originals, `SUPPRESSED` + `DUPLICATE_EVENT` for duplicates; route originals only. Replay projection adds `duplicateOf`. The lookup lives in a package-private `EventDedup` class in `intake` (introduced by the refactor commit), so no feature package is added. Deviation: the originals / suppressed split and their audits live in `IntakeService.create`, next to the inserts they depend on | `IntakeService`, new `EventDedup`, new `ContentHash` (package-private, next to `RequestHash`), `Notification` (new fields; existing constructor kept, overload added), `NotificationRepository`, `SubmittedNotification`, new `DedupProperties` in `IntakeConfiguration` |
+| Routing | `RoutingStep.route` already receives "the new notifications"; intake passes only originals. All suppressed -> empty list (existing early return). Added in the #41 review (D3): `ChannelRouter` calls `Notification.markRouted()` for a notification that gets a delivery | `ChannelRouter`, `RoutingStep` (contract) |
 | API | `SubmitResponse.Item` maps outcome to `ACCEPTED` / `SUPPRESSED`, `duplicateOf` with `@JsonInclude(NON_NULL)`. No new request fields, no validator change, `RequestHash` unchanged (so live idempotency records keep matching after deploy) | `SubmitResponse`, `NotificationController` (none if mapping stays in `SubmitResponse`) |
 | Status / audit (#11) | `overallStatus` `SUPPRESSED` first via `OverallStatus.derive(boolean suppressed, scheduledAt, now, deliveries)`; `duplicateOf` in status body (null when not suppressed). Audit read unchanged (`occurred_at, id`); new types `SUPPRESSED`, `DUPLICATE_EVENT` in `AuditEventType` | `OverallStatus`, `NotificationStatus`, `StatusResponse`; `AuditEventType`, `AuditRecorder` (two methods, `MANDATORY` like the rest) |
 | Callbacks (#11) | None: callbacks resolve by `deliveryId`; suppressed rows have no deliveries, so no callback can reach them | none |
@@ -185,11 +187,11 @@ Caveats for b-d (none applies to a):
 | Risk | Mitigation |
 |---|---|
 | Existing tests share `eventId: "evt-1"` (`SubmitRequests.valid`, `IntakeServiceIT.command`, `RoutingIT.command`, `RoutingPolicyIT`) and could be suppressed | Checked: every submit test clears tables `@BeforeEach`, and within a test every repeated submission either reuses the key (replay) or follows an attempt that wrote nothing (400 / 422 / 500 rollback). `keysAreScopedPerSourceSystem` resubmits under another source system, which D1 keeps distinct. The content hash only narrows matches further. New dedup tests set their own `eventId` |
-| `SubmitStatementsIT` prepared-statement budgets | Measured on `main` (`be7ce96`): create path **18 of 25**, replay **5 of 10**. Dedup adds one statement on create (19 of 25); replay only gains a projected column. Entity loads stay 0 (projection query) |
+| `SubmitStatementsIT` prepared-statement budgets | Measured on `main` (`be7ce96`): create path **18 of 25**, replay **5 of 10**. Dedup adds the lookup and (#41 review, D3) one bulk `routed` update on create; replay only gains a projected column. Budgets asserted unchanged; entity loads stay 0 (projection query) |
 | Replay of greenfield submissions after deploy | `duplicate_of` is null -> `ACCEPTED`; body unchanged; hash unchanged |
-| Pre-V3 rows have no `content_hash` | They never anchor: in the first window after deploy, a resend of a pre-deploy event is delivered (greenfield behaviour, fail open) |
+| Pre-V3 rows have no `content_hash` | They never anchor: in the first window after deploy, a resend of a pre-deploy event is delivered (greenfield behaviour) |
 | Response JSON for `ACCEPTED` items | `NON_NULL` on `duplicateOf`; asserted by a byte-level test |
-| Code rollback after suppressed rows exist | Old code ignores the new columns (Hibernate `validate` allows extra columns). Suppressed rows then read as `NOT_ROUTED` in status, and a same-key replay reports them as `ACCEPTED` (old `SubmitResponse` maps a constant) although nothing was sent. Prefer `nms.dedup.enabled=false` over a code rollback; document both |
+| Code rollback after suppressed rows exist | The schema is forward-only: a code rollback keeps `V3__event_dedup.sql` in the deployed migrations (removing an applied migration fails Flyway validate). Old code ignores the new columns (Hibernate `validate` allows extra columns; `routed` has a default). Suppressed rows then read as `NOT_ROUTED` in status, and a same-key replay reports them as `ACCEPTED` (old `SubmitResponse` maps a constant) although nothing was sent. Prefer `nms.dedup.enabled=false` over a code rollback; document both |
 | Notification insert cost | One more index on `notification`; inserts stay batched |
 
 Existing greenfield tests expected to change: **none**.
@@ -222,14 +224,14 @@ Existing greenfield tests expected to change: **none**.
 | | | Different `type`, recipient, or source system -> accepted |
 | | | Boundary with `MutableClock`: `window - 1µs` suppressed; exactly `window` accepted |
 | | | Anchor: original at t0, duplicate at t0+20h suppressed, resubmit at t0+25h accepted |
-| | | Original `NOT_ROUTED` still anchors (D3); pre-V3 row with null `content_hash` never anchors |
+| | | `NOT_ROUTED` original does not anchor; `FAILED` and `EXPIRED` originals do (D3, changed in #41); pre-V3 row with null `content_hash` never anchors |
 | | | Mixed batch: request order kept; only originals get `ACCEPTED` and routing events |
 | | | All suppressed: 202, no deliveries, no `ROUTED` / `QUEUED` |
 | | | Replay of mixed batch with the same key: 200, identical body, `DUPLICATE_SUBMISSION` on every row, no new `SUPPRESSED` |
 | | | Precedence: same key + different payload -> 409 / 4091; duplicate + unknown recipient -> 422, nothing written |
 | | | `enabled: false` -> greenfield result and no dedup query executed; `content_hash` still written |
 | Statements | `SubmitStatementsIT` (new method) | 100 recipients: dedup lookup executes once; entity loads 0; prepared statements stay within 25 |
-| Concurrency (optional) | `EventDedupRaceIT` with `RoutingGate` | Pins D8: both concurrent submissions accepted |
+| Concurrency (optional) | `EventDedupRaceIT` with real routing held in its transaction | Pins D8: both concurrent submissions accepted |
 | API IT | `SubmitDedupIT` | Response JSON shape for mixed batch; 202 for all-suppressed |
 | Status / audit IT (#11) | | `GET` suppressed -> `SUPPRESSED`, `deliveries: []`, `duplicateOf`; other source system -> 404; audit order |
 | Worker IT (#10) | | A suppressed submission leaves nothing due; poll sends nothing |
@@ -241,10 +243,10 @@ Existing greenfield tests expected to change: **none**.
 
 - Migration V3 is additive and runs before the code needs it; no backfill (pre-V3 rows never anchor, see section 5).
 - No shadow mode (D1). `nms.dedup.enabled` (default `true`) is the off switch: `false` restores greenfield behaviour (no lookup, no `SUPPRESSED`); `content_hash` is still written, so re-enabling works at once.
-- Changing `window` takes effect on the next submission; no data change.
+- `enabled` and `window` are read at startup: a change takes effect on restart; no data change.
 - API compatibility: additive only. New enum value `SUPPRESSED` in item `status` and `overallStatus`; new optional `duplicateOf`. Clients that check only the HTTP code (202) will not notice suppressed recipients: release note says to read per-item `status`. Clients with strict enum parsing need the new value.
 - In-flight idempotency keys keep replaying: request hash unchanged.
-- Rollback: turn dedup off first; a code rollback makes replays report suppressed items as `ACCEPTED` (section 5).
+- Rollback: turn dedup off first. A code rollback keeps V3 (forward-only schema; Flyway validate fails if an applied migration is missing) and makes replays report suppressed items as `ACCEPTED` (section 5).
 - Code PR order (issue #14): behaviour-preserving refactor first (`SubmittedNotification` carries an outcome, always `ACCEPTED`, mapped by `SubmitResponse` instead of a constant; extract the new-submission branch of `IntakeService.attempt` into its own method; add package-private `EventDedup` that returns every recipient as an original), zero test changes, CI green. Then V3, feature, metric, docs.
 
 ## Engineer decisions
@@ -253,7 +255,7 @@ Existing greenfield tests expected to change: **none**.
 |---|---|---|
 | D1 key | `(source_system, event_id, type, recipient_id, content_hash)`; hash over subject, body, severity | Changed from the draft's `(source_system, event_id, type, recipient_id)`; shadow mode and severity rule rejected ([review comment](https://github.com/radwara/nms/pull/31#discussion_r4344120633)) |
 | D2 window | `24h`, `nms.dedup.enabled` / `nms.dedup.window` | Accepted |
-| D3 original's outcome | Ignored | Accepted |
+| D3 original's outcome | Ignored | Changed by engineer: option B, a `NOT_ROUTED` original does not anchor; `FAILED` / `EXPIRED` do ([review comment](https://github.com/radwara/nms/pull/41#discussion_r4350865614)) |
 | D4 precedence | Replay / 409, then 422, then claim, then dedup | Accepted |
 | D5 row | Yes, `duplicate_of`, no FK, content kept | Accepted |
 | D6 response | 202, per-item `SUPPRESSED` + `duplicateOf` | Accepted |
@@ -263,16 +265,18 @@ Existing greenfield tests expected to change: **none**.
 
 ## Execution
 
-Code PR on `feat/14-event-dedup`, from `v0.1.0-greenfield`.
+Analysis: PR #31 (merged). Code: PR #41 on `feat/14-event-dedup`, from `v0.1.0-greenfield` (`667e70b`).
 
 | # | Commit | Content |
 |---|---|---|
-| 1 | `3d9a72c` refactor(intake): add event dedup and status seams, no-op | **Behaviour-preserving refactor.** `SubmittedNotification.outcome()` (always `ACCEPTED`) mapped by `SubmitResponse`; new-submission branch extracted to `IntakeService.create`; package-private `EventDedup` returning no duplicates; `OverallStatus.derive(boolean suppressed, ...)` with the 3-arg form delegating. `./mvnw -B clean verify` green (273 unit, 249 integration) |
+| 1 | `3d9a72c` refactor(intake): add event dedup and status seams, no-op | **Behaviour-preserving refactor.** `SubmittedNotification.outcome()` (always `ACCEPTED`) mapped by `SubmitResponse`; new-submission branch extracted to `IntakeService.create`; package-private `EventDedup` returning no duplicates; `OverallStatus.derive(boolean suppressed, ...)` with the 3-arg form delegating. Local `./mvnw -B clean verify` green (273 unit, 249 integration); CI green on draft PR #42 at `3d9a72c` (closed): https://github.com/radwara/nms/actions/runs/39806036157 |
 | 2 | `c21c02c` feat(db): V3 notification dedup columns and index | `V3__event_dedup.sql`, `Notification` fields and overload constructor |
 | 3 | `99dc84d` feat(intake): suppress repeated events within the dedup window | `ContentHash`, `DedupProperties`, `EventDedup` lookup, suppressed rows, audits, `IntakeMetrics`, config |
 | 4 | `c50e693` feat(api): SUPPRESSED in submit response, status, and audit | `SUPPRESSED` overall status, `duplicateOf` in status |
 | 5 | `5ebacd7` feat(demo): event dedup step with a suppressed repeat | `scripts/demo.sh` step 6 |
-| 6-9 | docs | ADR-0006, `architecture.md`, A-04 / A-35 / A-36 / A-39, `requirements.md`, README |
+| 6-10 | docs | ADR-0006, `architecture.md`, A-04 / A-35 / A-36 / A-39, `requirements.md`, README, this section |
+| 11 | `c440e93` fix(intake): routed-only dedup anchor and storm-safe lookup | #41 review: D3 option B (`routed` flag in V3, set by routing, persisted by one bulk update); lookup without `recipient_id in (:ids)`, index `(source_system, event_id, type, content_hash, duplicate_of, routed, created_at)`; `nms.dedup.lookup` timer; `in_clause_parameter_padding`; the 16-arg `Notification` constructor requires a content hash; `EventOriginal` lookup row. V3 edited in place (not merged) |
+| 12+ | docs | #41 review: D3, index, rollback, and wording updates |
 
 Zero test changes in the refactor commit:
 
@@ -283,7 +287,12 @@ $ git diff --stat v0.1.0-greenfield..3d9a72c -- src/test
 
 Greenfield tests changed: none. Three files gained new methods only, as planned in section 6 (`git diff v0.1.0-greenfield -- src/test` has no removed lines): `OverallStatusTest`, `SubmitStatementsIT`, `SchemaMigrationIT`.
 
-Deviations from this analysis: none in behaviour. Small additions: `SubmittedNotification.Outcome` enum carries the outcome; `RequestHash.sha256Hex` is shared with `ContentHash`; the optional `EventDedupRaceIT` is included.
+Deviations from this analysis:
+- D3 changed by the engineer (option B) and the lookup / index revised, both in the #41 review (sections 3 and 4).
+- The originals / suppressed split and their audits live in `IntakeService.create`, not in `EventDedup`.
+- Routing changed: `ChannelRouter` marks routed notifications (D3).
+- Small additions: `SubmittedNotification.Outcome` enum; `RequestHash.sha256Hex` shared with `ContentHash`; the optional `EventDedupRaceIT` included.
+- V3 verified on H2 only (tests and demo); not run against PostgreSQL.
 
 | PR | Review | Findings | Outcome |
 |---|---|---|---|
@@ -295,17 +304,20 @@ Deviations from this analysis: none in behaviour. Small additions: `SubmittedNot
 |---|---|
 | `ContentHashTest` | Known vector, 64 lowercase hex; ignores event, type, recipients, channels, priority, times; changes on subject, body, severity; no trimming; `("ab","c")` != `("a","bc")` |
 | `DedupPropertiesTest` | Defaults `true` / `24h`; binding; zero or negative window fails startup |
+| `NotificationTest` | A new row requires a content hash; `markRouted` on an original; a suppressed row cannot be routed |
 | `OverallStatusTest` (new methods) | `SUPPRESSED` wins over `SCHEDULED`, `NOT_ROUTED`, any deliveries; `suppressed = false` equals the greenfield table |
 | `SubmitResponseTest` | `ACCEPTED` item byte-identical to greenfield (no `duplicateOf`); `SUPPRESSED` item carries it |
-| `EventDedupIT` | Suppressed row, `duplicate_of`, same hash, no deliveries, `SUPPRESSED` / `DUPLICATE_EVENT` audits; different subject or body, `WARNING` -> `CRITICAL`, other type / recipient / source / event delivered; window strict (`window - 1µs` suppressed, `window` delivered); anchored on the original (20h suppressed, 25h delivered); `NOT_ROUTED` original anchors, channels not in key; pre-V3 row (null hash) never anchors; mixed batch order and routing; fully suppressed; replay after the window identical, no new `SUPPRESSED`; 409 / 422 before dedup; no content or hash in logs or audit |
+| `EventDedupIT` | Suppressed row, `duplicate_of`, same hash, no deliveries, `SUPPRESSED` / `DUPLICATE_EVENT` audits; different subject or body, `WARNING` -> `CRITICAL`, other type / recipient / source / event delivered; window strict (`window - 1µs` suppressed, `window` delivered); anchored on the original (20h suppressed, 25h delivered); `NOT_ROUTED` original does not anchor and its routed resend does; `FAILED` and `EXPIRED` originals anchor (worker run); channels and `expiresAt` not in the key; pre-V3 row (null hash) never anchors; mixed batch order and routing; fully suppressed; replay after the window identical, no new `SUPPRESSED`; 409 / 422 before dedup; no content or hash in logs or audit |
+| `EventDedupLookupIT` | Storm data (2,000 suppressed repeats, 2,000 unrouted rows, 2,000 other events): the lookup returns only the routed original; `EXPLAIN ANALYZE` uses `ix_notification_event_dedup` with `scanCount` <= 10 |
 | `EventDedupDisabledIT` | `enabled=false`: repeat delivered, no dedup query, hash still written |
 | `SubmitStatementsIT` (new method) | 100 recipients: one dedup lookup per submission, 0 entity loads, <= 25 statements |
-| `IntakeMetricsIT` | `nms.notifications.submitted{outcome}` per notification on commit; replay and rollback not counted |
-| `SchemaMigrationIT` (new method) | V3 applied; nullable columns; index column order |
-| `SubmitDedupIT` | HTTP: mixed batch shape; all suppressed 202, replay 200 same body; status `SUPPRESSED`, `deliveries: []`, `duplicateOf`; original `duplicateOf: null`; audit API; other tenant 404 and never suppressed; worker sends nothing for the suppressed row |
-| `EventDedupRaceIT` | Pins D8: two overlapping repeats under different keys are both accepted |
+| `IntakeMetricsIT` | `nms.notifications.submitted{outcome}` per notification on commit; replay and rollback not counted; `nms.dedup.lookup` once per new submission |
+| `SchemaMigrationIT` (new method) | V3 applied; nullable dedup columns; `routed` not null default false; index column order |
+| `SubmitDedupIT` (MockMvc, no server) | Mixed batch shape; all suppressed 202, replay 200 same body; status `SUPPRESSED`, `deliveries: []`, `duplicateOf`; original `duplicateOf: null`; audit API; other tenant 404 and never suppressed; worker sends nothing for the suppressed row |
+| `EventDedupRaceIT` (real HTTP, real routing) | Pins D8: two overlapping repeats under different keys are both accepted; a later one is suppressed |
+| `scripts/demo.sh` step 6 (real HTTP, dev-profile jar) | Suppressed repeat, delivered new message, status and audit of all three |
 
-`./mvnw -B clean verify`: 309 unit, 270 integration, 0 failures.
+`./mvnw -B clean verify`: 312 unit, 275 integration, 0 failures (after the #41 review fixes).
 
 Demo (`scripts/demo.sh` against the dev-profile jar), step 6:
 
