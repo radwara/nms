@@ -18,9 +18,9 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * The delivery queue (ADR-0004). Every worker write is a conditional update on {@code id}, the
  * expected {@code status}, and the expected {@code version}; a callback write is conditional on
- * {@code id}, {@code provider}, and {@code status in (SENDING, SENT)}. Every write increments
- * {@code version} and sets {@code updated_at}. Zero rows updated means another writer won. Called
- * outside a transaction, each write commits on return.
+ * {@code id}, {@code provider}, and {@code status in (SENDING, SENT, RETRY_SCHEDULED)}. Every write
+ * increments {@code version} and sets {@code updated_at}. Zero rows updated means another writer
+ * won. Called outside a transaction, each write commits on return.
  */
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
 
@@ -138,7 +138,9 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
   /**
    * A provider callback's final state ({@code DELIVERED} or {@code FAILED}). Not conditional on the
    * version, so it also applies while the worker still holds the claim; the worker's {@code SENT}
-   * write then changes nothing. {@code sent_at} and {@code provider_message_id} are kept if set.
+   * write then changes nothing. On a {@code RETRY_SCHEDULED} row it clears {@code next_attempt_at}
+   * and bumps the version, so the pending retry is never claimed. {@code sent_at} and {@code
+   * provider_message_id} are kept if set.
    */
   @Transactional
   @Modifying(clearAutomatically = true, flushAutomatically = true)
@@ -151,7 +153,8 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
           d.nextAttemptAt = null, d.version = d.version + 1, d.updatedAt = :now
       where d.id = :id and d.provider = :provider
         and d.status in (com.example.nms.common.DeliveryStatus.SENDING,
-                         com.example.nms.common.DeliveryStatus.SENT)
+                         com.example.nms.common.DeliveryStatus.SENT,
+                         com.example.nms.common.DeliveryStatus.RETRY_SCHEDULED)
       """)
   int applyCallback(
       @Param("id") UUID id,

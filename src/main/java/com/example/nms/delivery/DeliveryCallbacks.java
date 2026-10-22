@@ -23,10 +23,13 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * Applies provider callbacks (ADR-0003): the only way a callback changes a delivery. The row is
  * locked before the clock is read, so the callback's time is never before a worker write that
  * committed first. The write is conditional on {@code id}, {@code provider}, and {@code status in
- * (SENDING, SENT)}, not on the version, so a callback that beats the worker's {@code SENT} write
- * still applies; that write is conditional on the claim's version and then changes nothing. Final
- * states never change: a repeat or late callback is audited {@code CALLBACK_IGNORED}. The write,
- * its audit, and the outcome metric (after commit) belong to one transaction.
+ * (SENDING, SENT, RETRY_SCHEDULED)}, not on the version, so a callback that beats the worker's
+ * {@code SENT} write still applies; that write is conditional on the claim's version and then
+ * changes nothing. A callback for a {@code RETRY_SCHEDULED} delivery (the vendor accepted an
+ * attempt we classified as failed, A-47) applies too and cancels the retry: the claim of the
+ * pending retry is conditional on the version the callback bumped. {@code PENDING} was never sent.
+ * Final states never change: a repeat or late callback is audited {@code CALLBACK_IGNORED}. The
+ * write, its audit, and the outcome metric (after commit) belong to one transaction.
  */
 @Component
 public class DeliveryCallbacks {
@@ -58,7 +61,7 @@ public class DeliveryCallbacks {
 
   /** States a callback applies to; must match {@link DeliveryRepository#applyCallback}. */
   private static final Set<DeliveryStatus> APPLICABLE =
-      EnumSet.of(DeliveryStatus.SENDING, DeliveryStatus.SENT);
+      EnumSet.of(DeliveryStatus.SENDING, DeliveryStatus.SENT, DeliveryStatus.RETRY_SCHEDULED);
 
   private final DeliveryRepository deliveries;
   private final NotificationRepository notifications;
@@ -176,7 +179,7 @@ public class DeliveryCallbacks {
     return Result.IGNORED;
   }
 
-  /** Why a callback for a delivery in {@code status} (not SENDING or SENT) changes nothing. */
+  /** Why a callback for a delivery in {@code status} (not one it applies to) changes nothing. */
   static String why(DeliveryStatus status) {
     return switch (status) {
       case EXPIRED -> LATE_AFTER_EXPIRY;

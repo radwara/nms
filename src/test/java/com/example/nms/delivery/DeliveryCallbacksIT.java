@@ -18,6 +18,7 @@ import com.example.nms.provider.ChannelProvider;
 import com.example.nms.provider.SendRequest;
 import com.example.nms.provider.SendResult;
 import com.example.nms.provider.SendResult.Accepted;
+import com.example.nms.provider.SimulatedEmailProvider;
 import com.example.nms.support.MutableClock;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
@@ -62,6 +63,7 @@ class DeliveryCallbacksIT {
   @Autowired private DeliveryOutcomes outcomes;
   @Autowired private NotificationRepository notifications;
   @Autowired private MeterRegistry meters;
+  @Autowired private SimulatedEmailProvider email;
   @Autowired private AuditRecorder audit;
   @Autowired private TransactionTemplate transactions;
   @Autowired private MutableClock clock;
@@ -253,6 +255,42 @@ class DeliveryCallbacksIT {
     assertUnchanged(sent);
     assertThat(history(sent.getId()))
         .containsExactly("SENT", "CALLBACK_IGNORED provider mismatch; event FAILED");
+  }
+
+  @Test
+  void callbackForARetryScheduledDeliveryAppliesAndCancelsTheRetry() {
+    Instant start = clock.instant();
+    Notification n = notifications.save(notification("user-timeout", Priority.HIGH, start, null));
+    Delivery queued = deliveries.save(delivery(n, Channel.EMAIL, start));
+    worker.runOnce(); // TIMEOUT: the vendor may have accepted it anyway
+    Delivery retrying = reload(queued);
+    assertThat(retrying.getStatus()).isEqualTo(DeliveryStatus.RETRY_SCHEDULED);
+    long sends = email.sendCalls();
+    double delivered = outcomeCount(Channel.EMAIL, DeliveryStatus.DELIVERED);
+
+    Result result = callbacks.apply(callback(queued, EMAIL, CallbackEvent.DELIVERED, null));
+    clock.advance(Duration.ofHours(1));
+    worker.runOnce();
+
+    assertThat(result).isEqualTo(Result.APPLIED);
+    Delivery done = reload(queued);
+    assertThat(done.getStatus()).isEqualTo(DeliveryStatus.DELIVERED);
+    assertThat(done.getAttemptCount()).isEqualTo(1);
+    assertThat(done.getNextAttemptAt()).isNull();
+    assertThat(done.getSentAt()).as("coalesce(sent_at, now)").isEqualTo(done.getFinalizedAt());
+    assertThat(email.sendCalls()).as("no further send").isEqualTo(sends);
+    // A poll that read the row before the callback cannot claim it: the version moved.
+    assertThat(
+            deliveries.claim(
+                queued.getId(),
+                DeliveryStatus.RETRY_SCHEDULED,
+                retrying.getVersion(),
+                clock.instant()))
+        .isZero();
+    assertThat(history(queued.getId()))
+        .extracting(line -> line.split(" ")[0])
+        .containsExactly("ATTEMPT_FAILED", "RETRY_SCHEDULED", "DELIVERED");
+    assertThat(outcomeCount(Channel.EMAIL, DeliveryStatus.DELIVERED)).isEqualTo(delivered + 1);
   }
 
   @Test
