@@ -31,11 +31,12 @@ Spec 4.3 lists routing factors (requested channel, severity, recipient preferenc
 ### Limitations
 - Carrier-level SMS STOP is not modeled; real providers block even critical messages after STOP.
 - Callers set severity; a misused CRITICAL reaches every opted-out channel. Production: restrict CRITICAL per source system.
+- Changeover: a CRITICAL original routed before this release with SMS withheld still anchors event dedup (A-04), so a repeat within 24h is suppressed and that event never gets SMS.
 - Assumed answers above are unconfirmed (A-30). The rule lives in one place, so it is easy to reverse.
 
 ## 2. Execution
-- Write-up: PR #43. Code: this branch. `ChannelSelection.decide` takes the severity; for `CRITICAL` an opt-out no longer makes a channel unusable, and an opted-out channel that is selected gets `RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL`. No schema change (`routing_reason` is `varchar(32)`, no check constraint), no config.
-- Will change (opt-out-wins cases for CRITICAL): `ChannelSelectionTest` (escalation withheld when opted out; removed candidate reported as withheld escalation), `RoutingIT` (escalation withheld when opted out of SMS; multi-recipient case), `SubmitNotificationIT` (delivery count 4 -> 5; found by the build, approved by the engineer), demo step 3, README excerpt, `ChannelSelection` Javadoc, architecture.md Routing steps 2-3.
+- Write-up: PR #43. Code: routing change for #15. `ChannelSelection.decide` takes the severity; for `CRITICAL` an opt-out no longer makes a channel unusable, and an opted-out channel that is selected gets `RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL`. No schema change (`routing_reason` is `varchar(32)`, no check constraint), no config.
+- Changed (opt-out-wins cases for CRITICAL): `ChannelSelectionTest` (escalation withheld when opted out; removed candidate reported as withheld escalation), `RoutingIT` (escalation withheld when opted out of SMS; multi-recipient case), `SubmitNotificationIT` (delivery count 4 -> 5; found by the build, approved by the engineer), `RoutingPolicyIT` (added `#warningEscalationIsStillWithheldWhenOptedOut`, WARNING guard), demo step 3, README excerpt, `ChannelSelection` Javadoc, architecture.md Routing steps 2-3.
 - Unchanged on purpose: INFO / WARNING opt-out tests (guard that opt-out still applies).
 
 ## 3. Validation

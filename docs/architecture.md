@@ -126,7 +126,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 {
   "events": [
     { "at": "...", "type": "ACCEPTED" },
-    { "at": "...", "type": "ROUTED", "channel": "SMS", "detail": "added: severity CRITICAL" },
+    { "at": "...", "type": "ROUTED", "channel": "SMS", "detail": "SEVERITY_ESCALATION" },
     { "at": "...", "type": "ATTEMPT_FAILED", "channel": "EMAIL", "detail": "attempt 1, TRANSIENT, code 503" },
     { "at": "...", "type": "RETRY_SCHEDULED", "channel": "EMAIL", "detail": "in 0.4s" },
     { "at": "...", "type": "DUPLICATE_SUBMISSION", "detail": "same Idempotency-Key; original returned" },
