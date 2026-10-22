@@ -34,7 +34,7 @@ One branch and PR per issue; implementation by an implementer subagent from an o
 | [#27](https://github.com/radwara/nms/pull/27#issuecomment-6325765783) | #9 | 10 | Bug, performance | 6 | 3 | 1 engineer decision, 2 declined | 153 + 165 |
 | [#32](https://github.com/radwara/nms/pull/32#issuecomment-6328806265) | #10 | 19 | Bug, architecture, performance | 12 | 10 | 1 declined, 1 carried to #11 | 224 + 212 |
 | [#34](https://github.com/radwara/nms/pull/34#issuecomment-6332101203) | #11 | 18 | Bug, general | 11 | 7 | 2 engineer decisions, 1 documented limitation, 1 carried to #14 | 270 + 245 |
-| #35 | #13 | 14 | Architecture drift (code vs `architecture.md`, ADRs), grader review (README, demo, traceability) | 34 | 34 | Record on the PR | 273 + 249 |
+| #35 | #13 | 15 | Architecture drift (code vs `architecture.md`, ADRs), grader review (README, demo, traceability) | 30 | 30 | Record on the PR | 273 + 249 |
 
 Total for #6-#11: 81 findings, 58 fixed before merge.
 
