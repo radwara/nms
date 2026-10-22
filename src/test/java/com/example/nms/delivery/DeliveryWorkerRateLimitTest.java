@@ -26,6 +26,7 @@ import com.example.nms.provider.SendResult.Accepted;
 import com.example.nms.support.MutableClock;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -70,8 +71,9 @@ class DeliveryWorkerRateLimitTest {
   @BeforeEach
   void twoDueDeliveriesOfOneSource() {
     Notification notification = notification("user-ok", Priority.NORMAL, NOW, null);
-    first = polled(notification);
-    second = polled(notification);
+    // first sorts before second (due earlier); ties would fall back to the random id.
+    first = polled(notification, NOW.minusSeconds(1));
+    second = polled(notification, NOW);
     when(deliveries.findDue(eq(DeliveryStatus.PENDING), eq(Priority.NORMAL), any(), any()))
         .thenReturn(List.of(first, second));
     when(notifications.findAllById(any())).thenReturn(List.of(notification));
@@ -118,8 +120,8 @@ class DeliveryWorkerRateLimitTest {
   }
 
   /** A delivery as the poll returns it: persisted, version 0. */
-  private static Delivery polled(Notification notification) {
-    Delivery delivery = delivery(notification, Channel.EMAIL, NOW);
+  private static Delivery polled(Notification notification, Instant dueAt) {
+    Delivery delivery = delivery(notification, Channel.EMAIL, dueAt);
     ReflectionTestUtils.setField(delivery, "version", 0L);
     return delivery;
   }
