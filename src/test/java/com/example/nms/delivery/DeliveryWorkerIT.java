@@ -54,6 +54,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
@@ -64,6 +65,9 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @SpringBootTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
 @Import(DeliveryWorkerIT.TestBeans.class)
 @ExtendWith(OutputCaptureExtension.class)
+// Logback is JVM-global: a context started since this one was cached (e.g. the dev profile's plain
+// console) may have reconfigured it. A fresh context reinitializes logging for the format checks.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
 class DeliveryWorkerIT {
 
   private static final Pattern TRACE_ID = Pattern.compile("\"traceId\":\"([0-9a-f]{32})\"");

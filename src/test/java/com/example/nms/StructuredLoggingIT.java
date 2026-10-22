@@ -8,10 +8,14 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.test.annotation.DirtiesContext;
 
 /** #6: logs are structured JSON (ECS) outside the dev profile. */
 @SpringBootTest
 @ExtendWith(OutputCaptureExtension.class)
+// Logback is JVM-global: a context started since this one was cached (e.g. the dev profile's plain
+// console) may have reconfigured it. A fresh context reinitializes logging for the format checks.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
 class StructuredLoggingIT {
 
   @Test

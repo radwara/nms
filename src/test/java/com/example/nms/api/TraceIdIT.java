@@ -12,6 +12,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
@@ -19,6 +20,9 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 @SpringBootTest
 @AutoConfigureMockMvc
 @ExtendWith(OutputCaptureExtension.class)
+// Logback is JVM-global: a context started since this one was cached (e.g. the dev profile's plain
+// console) may have reconfigured it. A fresh context reinitializes logging for the format checks.
+@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
 class TraceIdIT {
 
   private static final String SOURCE = "/api/v1/test/source";
