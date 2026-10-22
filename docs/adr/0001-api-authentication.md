@@ -54,7 +54,7 @@ A webhook token is generated the same way without the `nms_<keyId>_` prefix; its
 
 ### Demo credentials (dev profile and tests only)
 
-Not secrets and deliberately not random. Hashes live in `application-dev.yml` and `src/test/resources/config/application.yml`; never configure them elsewhere. Startup logs a WARN when any of them is configured.
+Not secrets and deliberately not random. Hashes live in `application-dev.yml` and `src/test/resources/config/application.yml`; never configure them elsewhere. Startup logs a WARN when any of them is configured. The simulated vendors' callbacks (#11) send the plaintext webhook tokens below, so those are also in the same two files as `nms.simulator.callbacks.tokens`; real tokens never go there.
 
 | API key | keyId | sourceSystem |
 |---|---|---|
