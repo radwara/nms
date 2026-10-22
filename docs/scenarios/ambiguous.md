@@ -1,30 +1,42 @@
 # Ambiguous requirement: CRITICAL alerts vs channel opt-out
 
-## 1. Ambiguity
-Spec 4.3 routes by requested channel, severity, recipient preferences, and routing policy, but does not say which wins when they conflict. Example: a CRITICAL fraud alert for a user who opted out of SMS.
+- Issue: #15. Requirements: SC-3, A-30, A-02 (spec 3.3 has no content; scenario chosen by us).
 
-Opt-out is generally for commercial messages (promotions, ads). It is not meant for critical alerts (OTPs, fraud and security alerts). Respecting it for those means a user misses an alert they need.
+## 1. Decomposition
 
-## 2. Stakeholders
-| Stakeholder | Position |
-|---|---|
-| Compliance / legal | Opt-out covers commercial messages; critical service messages override it |
-| Product | CRITICAL means must-deliver (OTP, fraud, security); promotional messages always respect opt-out |
-| Source-system owners | Send CRITICAL only for must-deliver alerts; promotions are INFO/WARNING |
+### Ambiguity
+Spec 4.3 lists routing factors (requested channel, severity, recipient preferences, routing policy) with no precedence. Opt-out is stored per channel, without a message category, so it cannot say whether it covers alerts. Example: a CRITICAL fraud alert for a user who opted out of SMS.
 
-## 3. Options
+### Questions for stakeholders (positions assumed until confirmed)
+| Stakeholder | Question | Assumed answer |
+|---|---|---|
+| Compliance / legal | Does an opt-out cover security alerts and OTPs? | No; opt-out covers commercial messages |
+| Product | What is CRITICAL? | Must-deliver: OTP, fraud, security. Promotions respect opt-out |
+| Source-system owners | Will CRITICAL be used only for must-deliver alerts? | Yes; promotions are INFO / WARNING |
+
+### Options
 | Option | Trade-off |
 |---|---|
 | A. Opt-out always wins (greenfield baseline) | Respects every preference; critical alerts can be lost |
-| **B. CRITICAL overrides opt-out** | Critical alerts reach the user; opt-out still governs everything else |
-| C. CRITICAL falls back to another channel | Avoids the opted-out channel, but fails when it is the only usable one |
+| **B. CRITICAL ignores opt-out** | Critical alerts reach the user; opt-out still governs INFO / WARNING |
+| C. Consent per message category (opt out of marketing, not alerts) | Right long-term model; needs a preference schema change, out of scope |
 
-## 4. Decision
-**B.** CRITICAL overrides channel opt-out. INFO and WARNING respect it. A missing address always removes the channel. Every override is audited. Fixed rule, not configuration.
+### Decision
+**B. For CRITICAL, opt-out never removes a channel.** Trust CRITICAL.
+- Opt-out is for commercial messages (promotions, ads), not OTPs or critical alerts.
+- Channel selection is otherwise unchanged: requested channels, else all channels, plus severity escalation. A missing address still removes a channel.
+- Audit: an overridden channel is logged once as `ROUTED <channel>` with reason `OPT_OUT_OVERRIDDEN_CRITICAL`.
+- Fixed rule, not configuration: it is a safety rule; a config switch could silently turn it off.
 
-## 5. Limitations
+### Limitations
 - Carrier-level SMS STOP is not modeled; real providers block even critical messages after STOP.
-- Callers set severity, so CRITICAL could be misused. Production: restrict CRITICAL per source system.
+- Callers set severity; a misused CRITICAL reaches every opted-out channel. Production: restrict CRITICAL per source system.
+- Assumed answers above are unconfirmed (A-30). The rule lives in one place, so it is easy to reverse.
 
-## 6. Execution and validation
-<!-- filled after the code: PR, tests, demo step -->
+## 2. Execution
+- Write-up: PR #43. Code: to follow.
+- Will change (opt-out-wins cases for CRITICAL): `ChannelSelectionTest` (escalation withheld when opted out; removed candidate reported as withheld escalation), `RoutingIT` (escalation withheld when opted out of SMS; multi-recipient case), demo step 3, README excerpt, `ChannelSelection` Javadoc, architecture.md Routing step 3.
+- Unchanged on purpose: INFO / WARNING opt-out tests (guard that opt-out still applies).
+
+## 3. Validation
+<!-- filled after the code: tests per branch, demo step 3 output -->
