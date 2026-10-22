@@ -134,7 +134,7 @@ public class DeliveryWorker {
    * One poll: works up to {@code batch-size} due deliveries and returns how many it finished an
    * attempt or a final state for. Stops between deliveries once the worker is stopping or the
    * thread is interrupted; the rest stay due. Not thread-safe by design; one single-threaded poller
-   * calls it.
+   * calls it. {@link #process(UUID)} may run alongside it.
    */
   public int runOnce() {
     return metrics.timePoll(this::pollOnce).worked();
@@ -180,16 +180,56 @@ public class DeliveryWorker {
         log.info("Worker stopping; the rest of the batch stays due");
         break;
       }
-      TraceIds.Scope scope = TraceIds.open(TraceIds.newId());
-      try {
-        if (work(delivery, notificationsById, recipientsById, throttled)) {
-          worked++;
-        }
-      } finally {
-        scope.close();
+      if (workTraced(delivery, notificationsById, recipientsById, throttled)) {
+        worked++;
       }
     }
     return new Poll(due.size(), worked);
+  }
+
+  /**
+   * Works one delivery by id through the same per-row path as a poll (ADR-0008 fast path), if it is
+   * {@code PENDING} and due; otherwise does nothing. Safe to call while the poller runs: the
+   * conditional claim lets only one caller send. Returns whether it finished an attempt or a final
+   * state.
+   */
+  public boolean process(UUID deliveryId) {
+    if (stopping()) {
+      return false;
+    }
+    Optional<Delivery> found = deliveries.findById(deliveryId);
+    // Same condition as the PENDING poll. Required: claim checks only the status and version read.
+    if (found.isEmpty() || !firstDispatchDue(found.get(), clock.instant())) {
+      log.debug("Delivery {} not pending and due; skipped", deliveryId);
+      return false;
+    }
+    Delivery delivery = found.get();
+    Map<UUID, Notification> notificationsById =
+        byId(notifications.findAllById(Set.of(delivery.getNotificationId())), Notification::getId);
+    Map<String, Recipient> recipientsById =
+        byId(
+            recipients.findAllById(ids(notificationsById.values(), Notification::getRecipientId)),
+            Recipient::getId);
+    return workTraced(delivery, notificationsById, recipientsById, new HashSet<>());
+  }
+
+  private static boolean firstDispatchDue(Delivery delivery, Instant now) {
+    Instant due = delivery.getNextAttemptAt();
+    return delivery.getStatus() == DeliveryStatus.PENDING && due != null && !due.isAfter(now);
+  }
+
+  /** {@link #work} under a fresh trace id. */
+  private boolean workTraced(
+      Delivery delivery,
+      Map<UUID, Notification> notificationsById,
+      Map<String, Recipient> recipientsById,
+      Set<RateLimiter.Key> throttled) {
+    TraceIds.Scope scope = TraceIds.open(TraceIds.newId());
+    try {
+      return work(delivery, notificationsById, recipientsById, throttled);
+    } finally {
+      scope.close();
+    }
   }
 
   private boolean stopping() {
