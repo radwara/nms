@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/radwara/nms/actions/workflows/ci.yml/badge.svg)](https://github.com/radwara/nms/actions/workflows/ci.yml)
 
-Prototype service that accepts notification requests from source systems, routes each recipient to channels (requested channels, preferences, severity policy), delivers asynchronously through simulated email and SMS providers with bounded retries, and tracks the final outcome through provider callbacks. Built as one Spring Boot app on H2 in three scenarios: greenfield, brownfield (event-level dedup), and an ambiguous requirement (CRITICAL vs opt-out). Feature and scenario work went issue -> PR -> CI -> independent review -> engineer merge. Each CI run's summary page shows test counts and line coverage.
+Prototype service that accepts notification requests from source systems, routes each recipient to channels (requested channels, preferences, severity policy), delivers asynchronously through simulated email and SMS providers with bounded retries, and tracks the final outcome through provider callbacks. Built as one Spring Boot app on H2 in three scenarios: greenfield, brownfield (event-level dedup), and an ambiguous requirement (CRITICAL vs opt-out); a second brownfield change added an outbound rate limit and an optional Kafka fast path for EMAIL. Feature and scenario work went issue -> PR -> CI -> independent review -> engineer merge. Each CI run's summary page shows test counts and line coverage.
 
 ## Quick start
 
@@ -15,7 +15,13 @@ Requires Java 21. No other installs.
 
 Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Outbound sends are rate limited per source system and channel (`nms.rate-limit.*`: EMAIL 600, SMS 60, other channels 30 per minute; ADR-0007). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
 
-Kafka mode (ADR-0008, off by default; needs a broker): `NMS_KAFKA_ENABLED=true SPRING_KAFKA_BOOTSTRAP_SERVERS=host:9092 ./mvnw spring-boot:run`. EMAIL first dispatch then goes through topic `nms.delivery.email`; the poller sends anything Kafka missed after `nms.kafka.poller-grace` (30s). Tests use an in-JVM broker; no install needed.
+Kafka mode (ADR-0008, off by default; needs a broker). Local broker: `brew install kafka`, `brew services start kafka`. Then:
+
+```
+NMS_KAFKA_ENABLED=true SPRING_KAFKA_BOOTSTRAP_SERVERS=localhost:9092 ./mvnw spring-boot:run
+```
+
+EMAIL first dispatch then goes through topic `nms.delivery.email` (created at startup); the poller sends anything Kafka missed after `nms.kafka.poller-grace` (30s). Tests use an in-JVM broker; no install needed.
 
 ## Docker
 
@@ -102,8 +108,8 @@ One section per evaluation criterion in the assignment. Each bullet points to th
 
 ### Architecture and system design
 - [`docs/architecture.md`](docs/architecture.md): components, API contracts, data model, state machines, control flow, Key decisions table.
-- Six ADRs with rejected options: [`docs/adr/`](docs/adr/) (auth, per-recipient model, two-phase status, DB queue, stack, event dedup).
-- Brownfield impact analysis merged before any code: [`docs/scenarios/brownfield.md`](docs/scenarios/brownfield.md) (PR [#31](https://github.com/radwara/nms/pull/31)).
+- Eight ADRs with rejected options: [`docs/adr/`](docs/adr/) (auth, per-recipient model, two-phase status, DB queue, stack, event dedup, outbound rate limit, Kafka fast path; ADR-0004 partially superseded by ADR-0008).
+- Brownfield impact analysis merged before any code: [`docs/scenarios/brownfield.md`](docs/scenarios/brownfield.md) (PR [#31](https://github.com/radwara/nms/pull/31)); brownfield 2 (rate limit, Kafka fast path): [`docs/scenarios/brownfield-2.md`](docs/scenarios/brownfield-2.md), the analysis is the first commit of each PR (`b12d368`, `2594582`).
 
 ### Decomposition and execution
 - Backlog of issues with acceptance criteria linked to requirement IDs; build order reviewed and changed before code ([backlog review](https://github.com/radwara/nms/issues/6#issuecomment-6308373952)).
@@ -144,12 +150,12 @@ Tests are written from each issue's acceptance criteria before or with the code;
 
 | Layer | What |
 |---|---|
-| Unit (`*Test`, 33 classes) | Pure logic without Spring: validation, hashing, routing decisions, retry policy, overall status table, package rules |
-| Integration (`*IT`, 42 classes) | Full Spring context, own in-memory H2 per context: API contracts, idempotency races, worker, callbacks, metrics, logs |
+| Unit (`*Test`, 38 classes) | Pure logic without Spring: validation, hashing, routing decisions, retry policy, overall status table, package rules |
+| Integration (`*IT`, 50 classes) | Full Spring context, own in-memory H2 per context: API contracts, idempotency races, worker, callbacks, rate limit, metrics, logs; embedded Kafka broker in-JVM for the Kafka ITs |
 | End to end | `GreenfieldE2EIT` (real server, background poller, HTTP callbacks); `scripts/demo.sh` against the jar in CI |
-| Measured | Statement counts (`SubmitStatementsIT`), index plans (`EventDedupLookupIT`), poll scan sizes (#32) |
+| Measured | Statement counts (`SubmitStatementsIT`, `RateLimitFloodIT`), index plans (`EventDedupLookupIT`), poll scan sizes (#32; `DeliveryQueueIT`, 20 of 5,000 rows, #51), submit latency with the broker down (`KafkaBrokerDownSubmitIT`) |
 
-Final run (`./mvnw -B verify`): **317 unit + 280 integration tests, 0 failures; 96.4% line coverage, 90.1% branch** (JaCoCo, unit + IT merged; report in `target/site/jacoco/index.html`).
+Final run (`./mvnw -B verify`): **363 unit + 302 integration tests, 0 failures; 96.5% line coverage, 90.9% branch** (JaCoCo, unit + IT merged; report in `target/site/jacoco/index.html`).
 
 ## Operating it
 
@@ -162,6 +168,22 @@ Signals, metrics, and what to alert on: [architecture.md "Operations"](docs/arch
 | `NMS_WORKER_ENABLED` | `true` | Off: deliveries stay queued |
 | `NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW` | `true`, `24h` | Event dedup off switch and window (restart to apply) |
 | `NMS_IDEMPOTENCY_RETENTION` | `7d` | How long an `Idempotency-Key` is honored |
+| `NMS_KAFKA_ENABLED`, `SPRING_KAFKA_BOOTSTRAP_SERVERS` | `false`, `localhost:9092` | Kafka fast path for EMAIL first dispatch (ADR-0008) |
+
+In `application.yml`, positive, validated and read at startup (restart to apply):
+
+| Setting | Default | Effect |
+|---|---|---|
+| `nms.rate-limit.window` | `1m` | Fixed window, aligned to the epoch (ADR-0007) |
+| `nms.rate-limit.per-source.<CHANNEL>` | EMAIL `600`, SMS `60` | Sends per source system, channel and window; every attempt counts, CRITICAL too |
+| `nms.rate-limit.default-per-source` | `30` | Any channel not listed |
+| `nms.kafka.poller-grace` | `30s` | Kafka on: poller takes an EMAIL first dispatch only once created this long ago, or once moved |
+| `nms.kafka.partitions`, `nms.kafka.concurrency` | `3`, `3` | Topic partitions (when created here), consumer threads |
+
+Signals added by brownfield 2:
+- `nms.delivery.deferred{channel,reason=rate_limited}` sustained: a source is over its limit (source in the worker's DEBUG log).
+- `nms.kafka.published{outcome=failed}`: broker unreachable or publish queue full; the poller sends those EMAILs one grace later.
+- Consumer lag (`kafka_consumer_fetch_manager_records_lag_max`, group `nms-delivery`) above the grace: the poller is taking EMAIL first dispatch; both paths together are safe (claim).
 
 ## Security
 
@@ -180,11 +202,13 @@ Details: [architecture.md "Security"](docs/architecture.md#security).
 | A delivery that expired after a lease reclaim may have been sent; a late callback is audited, not applied | A-48 |
 | H2 locking differs from PostgreSQL; lock waits rely on H2 `LOCK_TIMEOUT` | ADR-0005, architecture.md "Scaling path" |
 | Two concurrent repeats of an event under different keys are both delivered; reworded text is not caught | ADR-0006 |
-| Single instance, single-threaded poller; scaling path not built | ADR-0004 |
+| Single instance; one poller thread (plus Kafka consumer threads when on); multi-instance path not built | ADR-0004, ADR-0008 |
+| Rate limit counts per instance and resets on restart; up to 2x a limit in a burst across a window boundary; a throttled key's backlog is re-swept once per window | ADR-0007 |
+| Kafka path is not a transactional outbox: a lost publish waits for the grace (poller); under consumer lag a CRITICAL EMAIL waits in topic order, up to the grace; a scheduled EMAIL due less than the grace after creation goes out at creation + grace | ADR-0008 |
 | Content stored in plaintext; no purge of idempotency or audit rows | architecture.md "Data model" |
 | `/actuator/prometheus` needs no key; one generic callback format, no vendor signatures | architecture.md "Security", ADR-0003 |
 | Carrier SMS STOP not modeled; a misused CRITICAL reaches opted-out channels | [`ambiguous.md`](docs/scenarios/ambiguous.md) |
-| V3 migration verified on H2 only; Docker image verified in CI only | `brownfield.md`, Docker above |
+| V3 and V4 migrations verified on H2 only; Docker image verified in CI only | `brownfield.md`, `brownfield-2.md`, Docker above |
 | A-01, A-02 unconfirmed (no reply from the hiring team) | `ambiguity-log.md` |
 
 ## Trade-offs
@@ -197,6 +221,8 @@ Details: [architecture.md "Security"](docs/architecture.md#security).
 | Database table as queue | Broker, in-memory queue | Durable, no infrastructure; polling latency and DB load | [ADR-0004](docs/adr/0004-database-backed-delivery-queue.md) |
 | H2 | PostgreSQL + Testcontainers | Runs with one command, no Docker; different locking | [ADR-0005](docs/adr/0005-technology-stack.md) |
 | Content hash in the dedup key | `eventId` key, shadow mode | A different message is never dropped; reworded resends are not caught | [ADR-0006](docs/adr/0006-event-level-deduplication.md) |
+| Fixed window in memory, key (source system, channel), no CRITICAL bypass | Inbound 429, channel-only key, token bucket, Redis / DB counters | Fair between sources, no new infrastructure; per instance, 2x burst at a boundary | [ADR-0007](docs/adr/0007-outbound-rate-limit.md) |
+| Kafka fast path for EMAIL first dispatch, poller reconciles after a grace | Transactional outbox, all channels on Kafka, design note only | Lower EMAIL latency, off by default, poller still guarantees delivery; a lost publish waits the grace | [ADR-0008](docs/adr/0008-kafka-fast-path-email.md) |
 | CRITICAL overrides opt-out (fixed rule) | Opt-out wins, per-category consent | Critical alerts reach the user; no schema change | [`ambiguous.md`](docs/scenarios/ambiguous.md) |
 
 ## AI usage
