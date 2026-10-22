@@ -48,7 +48,7 @@ The `Test` column is filled in as items are implemented; it becomes the traceabi
 | ID | Deliverable | Evidence |
 |---|---|---|
 | D-1 | Working prototype, runnable end-to-end | `GreenfieldE2EIT`; `scripts/demo.sh` (run in CI against the started jar) |
-| D-2 | Architecture overview: components, tools, execution approach, control flow, key decisions | `docs/architecture.md`, `docs/adr/` |
-| D-3 | Three scenarios, each with decomposition, execution, validation | Greenfield: `docs/scenarios/greenfield.md`. Brownfield: `docs/scenarios/brownfield.md` (impact analysis, engineer decisions, Execution, Validation; #14). Ambiguous (#15): pending |
-| D-4 | Setup instructions | Pending (#16); demo run in `README.md` |
-| D-5 | Testing approach, limitations, trade-offs | Greenfield: `docs/scenarios/greenfield.md` (Validation, Limitations). Full write-up pending (#16) |
+| D-2 | Architecture overview: components, tools, execution approach, control flow, key decisions | `docs/architecture.md` (Components, Key decisions, Control flow), `docs/adr/`; tools and execution approach: `README.md` (AI usage, How this was built), `docs/process.md` |
+| D-3 | Three scenarios, each with decomposition, execution, validation | Greenfield: `docs/scenarios/greenfield.md` (#6-#13). Brownfield: `docs/scenarios/brownfield.md` (impact analysis, engineer decisions, Execution, Validation; #14, PRs #31, #41). Ambiguous: `docs/scenarios/ambiguous.md` (options, decision, Execution, Validation; #15, PRs #43, #45) |
+| D-4 | Setup instructions | `README.md` (Quick start, Docker, Run the demo) |
+| D-5 | Testing approach, limitations, trade-offs | `README.md` (Testing approach, Limitations, Trade-offs); Validation sections of the three scenario docs |
