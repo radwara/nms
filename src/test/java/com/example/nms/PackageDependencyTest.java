@@ -22,7 +22,6 @@ class PackageDependencyTest {
     "com.example.nms.routing..",
     "com.example.nms.delivery..",
     "com.example.nms.provider..",
-    "com.example.nms.callback..",
     "com.example.nms.status..",
     "com.example.nms.audit..",
     "com.example.nms.directory.."

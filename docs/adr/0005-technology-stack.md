@@ -30,9 +30,9 @@ The role centers on Java and Spring Boot. Reviewers must be able to run the prot
 | Tests | JUnit 5, Spring Boot Test, MockMvc, Awaitility, ArchUnit | Unit, slice, and end-to-end tests for async flows; package rules as tests |
 | CI | GitHub Actions: format check, build, tests, JaCoCo report artifact, Docker image build (non-root user); Dependabot for Maven and Actions | Docker is not installed locally; CI verifies the Dockerfile |
 
-Single module, packaged by feature (`api`, `intake`, `routing`, `delivery`, `provider`, `callback`, `status`, `audit`, `directory`, `security`, `observability`), plus `common`: shared vocabulary enums (and their stored codes) only, no business logic.
+Single module, packaged by feature (`api`, `intake`, `routing`, `delivery`, `provider`, `status`, `audit`, `directory`, `security`, `observability`), plus `common`: shared vocabulary enums (and their stored codes) only, no business logic. Provider callbacks have no package of their own (#11): the endpoint is in `api`, the state change in `delivery` (`DeliveryCallbacks`), the simulated vendor side in `provider`.
 
-Package rule, enforced by an ArchUnit test (`PackageDependencyTest`): feature packages (`intake`, `routing`, `delivery`, `provider`, `callback`, `status`, `audit`, `directory`) never import `api`. Domain code returns outcomes; controllers translate them to `ApiException`. From `security` they may import only `SourceSystem`. `observability` (trace ids, log redaction) has no web dependency, so workers can use it.
+Package rule, enforced by an ArchUnit test (`PackageDependencyTest`): feature packages (`intake`, `routing`, `delivery`, `provider`, `status`, `audit`, `directory`) never import `api`. Domain code returns outcomes; controllers translate them to `ApiException`. From `security` they may import only `SourceSystem`. `observability` (trace ids, log redaction) has no web dependency, so workers can use it.
 
 ## Consequences
 
