@@ -112,6 +112,7 @@ Branch `feat/46-rate-limit` from `e43ed23`.
 | 5 | `763703e` feat(delivery): rate limiter safe for concurrent callers | `ConcurrentHashMap.compute`; concurrency test |
 | 6+ | docs | ADR-0007, `architecture.md`, README, `requirements.md`, this section |
 | R | `c44ef1b` fix(delivery): fair rate limit deferral, FIFO order, slot release | Review fixes R1-R5 (section 9) and their tests |
+| R | `96c4d7e` test(delivery): fix row order in the rate limit release test | New test tied on due time and fell back to random id; distinct due times |
 
 Zero test changes in the refactor commit:
 
