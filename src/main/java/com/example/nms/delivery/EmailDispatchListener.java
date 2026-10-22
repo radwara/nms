@@ -24,7 +24,11 @@ class EmailDispatchListener {
     this.worker = worker;
   }
 
-  @KafkaListener(id = ID, idIsGroup = false, topics = KafkaDispatchConfiguration.TOPIC)
+  @KafkaListener(
+      id = ID,
+      idIsGroup = false,
+      topics = KafkaDispatchConfiguration.TOPIC,
+      concurrency = "${nms.kafka.concurrency:3}")
   void onMessage(String value) {
     UUID id;
     try {

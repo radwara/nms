@@ -47,15 +47,16 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       Limit limit);
 
   /**
-   * {@link #findDue} with the Kafka grace window (ADR-0008): rows of {@code channel} due after
-   * {@code cutoff} are left out (the fast path has them). Same index range and order; the extra
-   * condition is checked on rows the range reads.
+   * {@link #findDue} with the Kafka grace window (ADR-0008): a row of {@code channel} created after
+   * {@code cutoff} and never moved ({@code version 0}) is left out (the fast path has it). A row a
+   * postpone or rate-limit deferral moved has a higher version and is returned when due. Same index
+   * range and order; the extra condition is checked on rows the range reads.
    */
   @Query(
       """
       select d from Delivery d
       where d.status = :status and d.priority = :priority and d.nextAttemptAt <= :now
-        and (d.channel <> :channel or d.nextAttemptAt <= :cutoff)
+        and (d.channel <> :channel or d.createdAt <= :cutoff or d.version > 0)
       order by d.status, d.priority, d.nextAttemptAt, d.createdAt
       """)
   List<Delivery> findDueOutsideGrace(

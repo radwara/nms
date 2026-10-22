@@ -9,6 +9,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.example.nms.common.Channel;
+import com.example.nms.common.DeliveryStatus;
 import com.example.nms.common.Priority;
 import com.example.nms.intake.IntakeService;
 import com.example.nms.intake.Notification;
@@ -25,6 +26,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.kafka.test.EmbeddedKafkaBroker;
 import org.springframework.kafka.test.context.EmbeddedKafka;
 import org.springframework.kafka.test.utils.ContainerTestUtils;
@@ -39,6 +41,8 @@ import org.springframework.test.annotation.DirtiesContext;
     properties = {
       "nms.kafka.enabled=true",
       "nms.kafka.poller-grace=60s",
+      // One partition, so the duplicate test can rely on message order.
+      "nms.kafka.partitions=1",
       "nms.worker.enabled=true"
     })
 @EmbeddedKafka(
@@ -61,6 +65,7 @@ class KafkaEmailDispatchIT {
   @Autowired private MeterRegistry registry;
   @Autowired private JdbcTemplate jdbc;
   @Autowired private Clock clock;
+  @Autowired private DeliveryWorker worker;
 
   @BeforeEach
   void consumerAssigned() {
@@ -81,6 +86,30 @@ class KafkaEmailDispatchIT {
         .atMost(TIMEOUT)
         .until(() -> published(registry, DeliveryMetrics.PUBLISHED), p -> p == published + 1);
     assertThat(published(registry, DeliveryMetrics.PUBLISH_FAILED)).isZero();
+  }
+
+  /** The poller alone cannot send a fresh EMAIL row; the consumer does once it runs. */
+  @Test
+  void withTheConsumerStoppedThePollerLeavesTheEmailRowUntilTheConsumerStarts() {
+    MessageListenerContainer consumer = listeners.getListenerContainer(EmailDispatchListener.ID);
+    consumer.stop();
+    try {
+      UUID id = submit(intake, Channel.EMAIL, "user-ok").getFirst();
+      for (int i = 0; i < 3; i++) {
+        worker.runOnce();
+      }
+      Delivery queued = deliveries.findByNotificationIdOrderByChannel(id).getFirst();
+      assertThat(queued.getStatus()).isEqualTo(DeliveryStatus.PENDING);
+      assertThat(queued.getAttemptCount()).isZero();
+
+      consumer.start();
+      Delivery sent = awaitSent(deliveries, id, TIMEOUT);
+      assertThat(Duration.between(sent.getCreatedAt(), sent.getSentAt())).isLessThan(GRACE);
+    } finally {
+      if (!consumer.isRunning()) {
+        consumer.start();
+      }
+    }
   }
 
   @Test

@@ -13,9 +13,11 @@ import com.example.nms.common.Channel;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.RejectedExecutionException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.junit.jupiter.api.Test;
 import org.springframework.kafka.KafkaException;
@@ -29,8 +31,10 @@ class EmailDispatchPublisherTest {
   private final KafkaOperations<String, String> kafka = mock(KafkaOperations.class);
 
   private final MeterRegistry registry = new SimpleMeterRegistry();
+
+  /** Runs each publish task at once, on the calling thread. */
   private final EmailDispatchPublisher publisher =
-      new EmailDispatchPublisher(kafka, new DeliveryMetrics(registry));
+      new EmailDispatchPublisher(kafka, new DeliveryMetrics(registry), Runnable::run);
 
   private final UUID email1 = UUID.randomUUID();
   private final UUID email2 = UUID.randomUUID();
@@ -87,6 +91,52 @@ class EmailDispatchPublisherTest {
 
     verify(kafka, times(2)).send(anyString(), anyString(), anyString());
     assertThat(count(DeliveryMetrics.PUBLISH_FAILED)).isEqualTo(2);
+  }
+
+  @Test
+  void aFullPublishQueueCountsTheSubmissionFailedWithoutSending() {
+    EmailDispatchPublisher full =
+        new EmailDispatchPublisher(
+            kafka,
+            new DeliveryMetrics(registry),
+            task -> {
+              throw new RejectedExecutionException("queue full");
+            });
+
+    full.publish(queued);
+
+    verify(kafka, never()).send(anyString(), any(), any());
+    assertThat(count(DeliveryMetrics.PUBLISH_FAILED)).isEqualTo(2);
+  }
+
+  @Test
+  void theRequestThreadOnlyHandsOverTheIds() {
+    List<Runnable> handedOver = new ArrayList<>();
+    EmailDispatchPublisher deferred =
+        new EmailDispatchPublisher(kafka, new DeliveryMetrics(registry), handedOver::add);
+    when(kafka.send(anyString(), anyString(), anyString()))
+        .thenReturn(CompletableFuture.completedFuture(null));
+
+    deferred.publish(queued);
+
+    verify(kafka, never()).send(anyString(), any(), any());
+    handedOver.forEach(Runnable::run);
+    verify(kafka, times(2)).send(anyString(), anyString(), anyString());
+  }
+
+  @Test
+  void warmUpFetchesTheTopicMetadataOnThePublishThreadAndNeverThrows() {
+    List<Runnable> handedOver = new ArrayList<>();
+    EmailDispatchPublisher deferred =
+        new EmailDispatchPublisher(kafka, new DeliveryMetrics(registry), handedOver::add);
+    when(kafka.partitionsFor(KafkaDispatchConfiguration.TOPIC))
+        .thenThrow(new KafkaException("no broker"));
+
+    deferred.warmUp();
+
+    verify(kafka, never()).partitionsFor(anyString());
+    handedOver.forEach(Runnable::run);
+    verify(kafka).partitionsFor(KafkaDispatchConfiguration.TOPIC);
   }
 
   @Test

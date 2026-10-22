@@ -84,8 +84,12 @@ nms:
   kafka:
     # Kafka fast path for EMAIL first dispatch (ADR-0008). Off: the poller sends everything, no broker.
     enabled: ${NMS_KAFKA_ENABLED:false}
-    # With Kafka on, the poller takes an EMAIL first dispatch only once due longer than this (positive).
+    # With Kafka on, the poller takes a new EMAIL first dispatch only once created longer ago than
+    # this, or once moved (postpone, rate-limit deferral). Positive.
     poller-grace: 30s
+    # Topic partitions (when created here) and consumer threads: the throughput knobs. Positive.
+    partitions: 3
+    concurrency: 3
   rate-limit:
     # Outbound sends per source system and channel per fixed window (ADR-0007); every attempt counts,
     # CRITICAL included. Over the limit a delivery waits for the next window (status unchanged).

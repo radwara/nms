@@ -29,7 +29,8 @@ import org.springframework.test.annotation.DirtiesContext;
       "nms.worker.enabled=true",
       "spring.kafka.bootstrap-servers=localhost:1",
       "spring.kafka.producer.properties[max.block.ms]=200",
-      "spring.kafka.listener.auto-startup=false"
+      "spring.kafka.listener.auto-startup=false",
+      "spring.kafka.admin.auto-create=false"
     })
 // Stop this context's poller once the class is done.
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)

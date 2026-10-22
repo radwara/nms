@@ -104,11 +104,21 @@ class DeliveryWorkerFastPathTest {
 
   @Test
   void graceMustBePositive() {
-    assertThatThrownBy(() -> new KafkaDispatchProperties(Duration.ZERO))
+    assertThatThrownBy(() -> new KafkaDispatchProperties(Duration.ZERO, 3, 3))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("nms.kafka.poller-grace must be > 0");
-    assertThatThrownBy(() -> new KafkaDispatchProperties(Duration.ofSeconds(-1)))
+    assertThatThrownBy(() -> new KafkaDispatchProperties(Duration.ofSeconds(-1), 3, 3))
         .isInstanceOf(IllegalArgumentException.class);
+  }
+
+  @Test
+  void partitionsAndConcurrencyMustBePositive() {
+    assertThatThrownBy(() -> new KafkaDispatchProperties(GRACE, 0, 3))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("nms.kafka.partitions must be > 0");
+    assertThatThrownBy(() -> new KafkaDispatchProperties(GRACE, 3, 0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("nms.kafka.concurrency must be > 0");
   }
 
   @Test

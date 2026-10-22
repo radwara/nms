@@ -279,8 +279,8 @@ public class DeliveryWorker {
 
   /**
    * Due rows, best first: one query per due status and priority, plus reclaimable leases, merged
-   * here by priority then due time. With a grace window (Kafka on), {@code PENDING} rows of its
-   * channel due within the grace are left to the fast path.
+   * here by priority then due time. With a grace window (Kafka on), unmoved {@code PENDING} rows of
+   * its channel created within the grace are left to the fast path.
    */
   private List<Delivery> poll(Instant now) {
     Limit limit = Limit.of(properties.batchSize());
