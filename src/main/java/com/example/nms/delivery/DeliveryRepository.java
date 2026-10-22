@@ -14,9 +14,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * The delivery queue (ADR-0004). Every worker write is a conditional update on {@code id}, the
- * expected {@code status}, and the expected {@code version}; it increments {@code version} and sets
- * {@code updated_at}. Zero rows updated means another writer won. Called outside a transaction,
- * each write commits on return.
+ * expected {@code status}, and the expected {@code version}; a callback write is conditional on
+ * {@code id}, {@code provider}, and {@code status in (SENDING, SENT)}. Every write increments
+ * {@code version} and sets {@code updated_at}. Zero rows updated means another writer won. Called
+ * outside a transaction, each write commits on return.
  */
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
 
@@ -114,6 +115,32 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("version") long version,
       @Param("status") DeliveryStatus status,
       @Param("reason") String reason,
+      @Param("now") Instant now);
+
+  /**
+   * A provider callback's final state ({@code DELIVERED} or {@code FAILED}). Not conditional on the
+   * version, so it also applies while the worker still holds the claim; the worker's {@code SENT}
+   * write then changes nothing. {@code sent_at} and {@code provider_message_id} are kept if set.
+   */
+  @Transactional
+  @Modifying(clearAutomatically = true, flushAutomatically = true)
+  @Query(
+      """
+      update Delivery d
+      set d.status = :status, d.failureReason = :reason, d.finalizedAt = :now,
+          d.sentAt = coalesce(d.sentAt, :now),
+          d.providerMessageId = coalesce(d.providerMessageId, :providerMessageId),
+          d.nextAttemptAt = null, d.version = d.version + 1, d.updatedAt = :now
+      where d.id = :id and d.provider = :provider
+        and d.status in (com.example.nms.common.DeliveryStatus.SENDING,
+                         com.example.nms.common.DeliveryStatus.SENT)
+      """)
+  int applyCallback(
+      @Param("id") UUID id,
+      @Param("provider") String provider,
+      @Param("status") DeliveryStatus status,
+      @Param("reason") String reason,
+      @Param("providerMessageId") String providerMessageId,
       @Param("now") Instant now);
 
   /** Moves a row's due time without claiming it, e.g. after an unexpected error. */

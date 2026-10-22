@@ -160,7 +160,56 @@ public class AuditRecorder {
             at));
   }
 
-  /** Final failure; {@code reason} is a code, e.g. {@code INVALID_RECIPIENT}. */
+  /**
+   * Delivered, reported by the provider's callback; {@code detail} is the vendor's code, if any
+   * (e.g. {@code code 250}), and may be null.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void delivered(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      String detail,
+      Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            notificationId,
+            deliveryId,
+            AuditEventType.DELIVERED,
+            channel,
+            detail,
+            at));
+  }
+
+  /**
+   * A callback that changed nothing; {@code detail} says why, e.g. {@code already DELIVERED; event
+   * DELIVERED}.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void callbackIgnored(
+      String sourceSystem,
+      UUID notificationId,
+      UUID deliveryId,
+      Channel channel,
+      String detail,
+      Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            notificationId,
+            deliveryId,
+            AuditEventType.CALLBACK_IGNORED,
+            channel,
+            detail,
+            at));
+  }
+
+  /**
+   * Final failure; {@code reason} is a code, e.g. {@code INVALID_RECIPIENT}, optionally followed by
+   * the vendor's code ({@code BOUNCED, code MAILBOX_UNAVAILABLE}).
+   */
   @Transactional(propagation = Propagation.MANDATORY)
   public void failed(
       String sourceSystem,
