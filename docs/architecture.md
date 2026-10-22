@@ -126,7 +126,7 @@ Headers: `X-API-Key` (required), `Idempotency-Key` (required).
 {
   "events": [
     { "at": "...", "type": "ACCEPTED" },
-    { "at": "...", "type": "ROUTED", "channel": "SMS", "detail": "added: severity CRITICAL" },
+    { "at": "...", "type": "ROUTED", "channel": "SMS", "detail": "SEVERITY_ESCALATION" },
     { "at": "...", "type": "ATTEMPT_FAILED", "channel": "EMAIL", "detail": "attempt 1, TRANSIENT, code 503" },
     { "at": "...", "type": "RETRY_SCHEDULED", "channel": "EMAIL", "detail": "in 0.4s" },
     { "at": "...", "type": "DUPLICATE_SUBMISSION", "detail": "same Idempotency-Key; original returned" },
@@ -322,7 +322,7 @@ Index `(source_system, event_id, type, content_hash, duplicate_of, routed, creat
 | `provider` | varchar(32) | e.g. `sim-email`; separate from channel so providers can change per channel |
 | `status` | varchar(20) | `PENDING`, `SENDING`, `RETRY_SCHEDULED`, `SENT`, `DELIVERED`, `FAILED`, `EXPIRED` |
 | `priority` | smallint | Copied from the notification (HIGH=0, NORMAL=1, LOW=2) so the poll sorts correctly without a join |
-| `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION` |
+| `routing_reason` | varchar(32) | `REQUESTED`, `PREFERENCE`, `SEVERITY_ESCALATION`, `OPT_OUT_OVERRIDDEN_CRITICAL` |
 | `attempt_count` | int | Send attempts started; incremented by the claim, so an attempt lost to a crash counts |
 | `next_attempt_at` | timestamp null | Due time; null once final. Index `(status, priority, next_attempt_at)` serves the poll |
 | `claimed_at` | timestamp null | Lease start. Used only for the reclaim range check (`claimed_at < now - lease`) |
@@ -353,8 +353,8 @@ API keys and webhook tokens are configuration, not tables (ADR-0001). Production
 Resolved per notification (one recipient):
 
 1. Candidates: the recipient's `channels` from the request if given (reason `REQUESTED`), else every channel (`PREFERENCE`).
-2. Remove channels the recipient opted out of (`ROUTE_REMOVED`, detail `OPTED_OUT`), and channels with no contact address (`NO_ADDRESS`). An opt-out is reported first. Without a request, the remaining channels are the recipient's usable ones, and every skipped channel has a removal event.
-3. Apply policy from config, e.g. `CRITICAL` adds `SMS` (`SEVERITY_ESCALATION`). In greenfield an opt-out always wins over policy (revisited in the ambiguous scenario, A-30): a withheld escalation is `ROUTE_REMOVED` with detail `SEVERITY_ESCALATION withheld: OPTED_OUT|NO_ADDRESS`. A channel already selected keeps its first reason.
+2. Remove channels the recipient opted out of (`ROUTE_REMOVED`, detail `OPTED_OUT`; not for `CRITICAL`, see step 3), and channels with no contact address (`NO_ADDRESS`). An opt-out is reported first. Without a request, the remaining channels are the recipient's usable ones, and every skipped channel has a removal event.
+3. Apply policy from config, e.g. `CRITICAL` adds `SMS` (`SEVERITY_ESCALATION`). A withheld escalation is `ROUTE_REMOVED` with detail `SEVERITY_ESCALATION withheld: OPTED_OUT|NO_ADDRESS`. A channel already selected keeps its first reason. For `CRITICAL`, an opt-out never removes a channel (A-30, [ambiguous scenario](scenarios/ambiguous.md)): a requested, default or escalated channel the recipient opted out of is `ROUTED` once with reason `OPT_OUT_OVERRIDDEN_CRITICAL`, with no `ROUTE_REMOVED` for it. A missing address still removes it (`NO_ADDRESS`). The original reason is derivable from `requested_channels`: none requested is `PREFERENCE`, requested is `REQUESTED`, otherwise `SEVERITY_ESCALATION`. Fixed rule, not configuration.
 4. Each remaining channel becomes a `PENDING` `Delivery`: provider from config, numeric priority from the notification, `next_attempt_at = max(now, scheduledAt)`. Audited `ROUTED` (detail = reason), then `QUEUED` per delivery.
 5. No channel left: no deliveries, `NOT_ROUTED` audited, overall status `NOT_ROUTED`.
 

@@ -1,6 +1,7 @@
 package com.example.nms.routing;
 
 import com.example.nms.common.Channel;
+import com.example.nms.common.Severity;
 import com.example.nms.delivery.RoutingReason;
 import com.example.nms.directory.AddressPresence;
 import java.util.ArrayList;
@@ -17,8 +18,12 @@ import java.util.Set;
  * <p>Candidates are the requested channels, else every channel. A candidate the recipient opted out
  * of or has no address for is removed, so without a request the removals explain every channel the
  * recipient does not get. Escalation adds a channel unless the recipient opted out of it or has no
- * address for it: an opt-out always wins over policy (A-30 greenfield baseline). A channel already
- * selected keeps its first reason.
+ * address for it. A channel already selected keeps its first reason.
+ *
+ * <p>For {@code CRITICAL}, an opt-out never removes a channel (A-30, docs/scenarios/ambiguous.md):
+ * a candidate or escalation the recipient opted out of is selected with {@link
+ * RoutingReason#OPT_OUT_OVERRIDDEN_CRITICAL}. A missing address still removes it. Fixed rule, not
+ * configuration.
  */
 final class ChannelSelection {
 
@@ -39,26 +44,29 @@ final class ChannelSelection {
   record Removed(Channel channel, String reason) implements Decision {}
 
   /**
+   * @param severity the notification's severity; {@code CRITICAL} overrides opt-outs
    * @param requested channels from the request, or {@code null} to use preferences
    * @param escalation channels the policy adds for the notification's severity
    */
   static List<Decision> decide(
+      Severity severity,
       List<Channel> requested,
       List<Channel> escalation,
       Set<Channel> optedOut,
       AddressPresence addresses) {
+    boolean critical = severity == Severity.CRITICAL;
     List<Decision> decisions = new ArrayList<>();
     Set<Channel> selected = EnumSet.noneOf(Channel.class);
 
     List<Channel> candidates = requested != null ? requested : Arrays.asList(Channel.values());
     RoutingReason reason = requested != null ? RoutingReason.REQUESTED : RoutingReason.PREFERENCE;
     for (Channel channel : new LinkedHashSet<>(candidates)) {
-      String unusable = unusable(channel, optedOut, addresses);
+      String unusable = unusable(channel, critical, optedOut, addresses);
       if (unusable != null) {
         decisions.add(new Removed(channel, unusable));
       } else {
         selected.add(channel);
-        decisions.add(new Selected(channel, reason));
+        decisions.add(new Selected(channel, selectedReason(channel, reason, critical, optedOut)));
       }
     }
 
@@ -66,26 +74,40 @@ final class ChannelSelection {
       if (selected.contains(channel)) {
         continue; // already routed; keeps its first reason
       }
-      String unusable = unusable(channel, optedOut, addresses);
+      String unusable = unusable(channel, critical, optedOut, addresses);
       if (unusable != null) {
         decisions.add(new Removed(channel, ESCALATION_WITHHELD + unusable));
       } else {
         selected.add(channel);
-        decisions.add(new Selected(channel, RoutingReason.SEVERITY_ESCALATION));
+        decisions.add(
+            new Selected(
+                channel,
+                selectedReason(channel, RoutingReason.SEVERITY_ESCALATION, critical, optedOut)));
       }
     }
     return decisions;
   }
 
-  /** Why the channel cannot be used, or {@code null}. An opt-out is reported before an address. */
+  /**
+   * Why the channel cannot be used, or {@code null}. Below {@code CRITICAL} an opt-out is reported
+   * before a missing address; for {@code CRITICAL} only a missing address counts.
+   */
   private static String unusable(
-      Channel channel, Set<Channel> optedOut, AddressPresence addresses) {
-    if (optedOut.contains(channel)) {
+      Channel channel, boolean critical, Set<Channel> optedOut, AddressPresence addresses) {
+    if (!critical && optedOut.contains(channel)) {
       return OPTED_OUT;
     }
     if (!addresses.hasAddressFor(channel)) {
       return NO_ADDRESS;
     }
     return null;
+  }
+
+  /** A CRITICAL channel the recipient opted out of is labelled as an override. */
+  private static RoutingReason selectedReason(
+      Channel channel, RoutingReason reason, boolean critical, Set<Channel> optedOut) {
+    return critical && optedOut.contains(channel)
+        ? RoutingReason.OPT_OUT_OVERRIDDEN_CRITICAL
+        : reason;
   }
 }

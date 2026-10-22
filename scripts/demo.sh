@@ -145,7 +145,7 @@ show_audit "$HAPPY_ID"
 check '[.events[] | select(.type == "SENT")] | length == 2' "expected SENT per channel before the callback"
 ok
 
-step "3. Routing: CRITICAL adds SMS; an opt-out withholds it (opt-out wins until #15)"
+step "3. Routing: CRITICAL adds SMS and overrides an SMS opt-out (A-30)"
 submit "$RUN_ID-routing" "$(payload "$RUN_ID-routing" "$(recipient user-ok '["EMAIL"]')" "$(recipient user-sms-optout)")"
 expect_status 202
 check '[.notifications[].notificationId] | unique | length == 2' "expected one notification per recipient"
@@ -158,10 +158,11 @@ show_audit "$REQUESTED_ID"
 check '[.events[] | select(.type == "ROUTED") | "\(.channel) \(.detail)"] == ["EMAIL REQUESTED", "SMS SEVERITY_ESCALATION"]' \
   "expected EMAIL REQUESTED and SMS SEVERITY_ESCALATION"
 await_final "$OPTOUT_ID" DELIVERED
-check '[.deliveries[].channel] == ["EMAIL"]' "expected EMAIL only for the opted-out recipient"
+check '[.deliveries[].channel] == ["EMAIL", "SMS"]' "expected EMAIL and overridden SMS for the opted-out recipient"
 show_audit "$OPTOUT_ID"
-check '[.events[] | select(.type == "ROUTE_REMOVED" and .channel == "SMS") | .detail] == ["OPTED_OUT", "SEVERITY_ESCALATION withheld: OPTED_OUT"]' \
-  "expected the SMS opt-out and the withheld escalation"
+check '[.events[] | select(.type == "ROUTED") | "\(.channel) \(.detail)"] == ["EMAIL PREFERENCE", "SMS OPT_OUT_OVERRIDDEN_CRITICAL"]' \
+  "expected EMAIL PREFERENCE and SMS OPT_OUT_OVERRIDDEN_CRITICAL"
+check '[.events[] | select(.type == "ROUTE_REMOVED")] | length == 0' "expected no ROUTE_REMOVED for CRITICAL"
 ok
 
 step "4. Retry path: user-flaky2, two transient failures (503), then accepted and delivered"

@@ -80,6 +80,7 @@ class ChannelRouter implements RoutingStep {
       }
       List<Decision> decisions =
           ChannelSelection.decide(
+              notification.getSeverity(),
               notification.getRequestedChannels(),
               policy.escalation(notification.getSeverity()),
               optOuts.getOrDefault(notification.getRecipientId(), Set.of()),

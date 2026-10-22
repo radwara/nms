@@ -99,8 +99,9 @@ class SubmitNotificationIT {
       assertThat(auditTypes(id.getValue())).first().isEqualTo("ACCEPTED");
     }
     // Routed in the same transaction (details in RoutingIT): user-ok SMS + EMAIL as requested,
-    // the other two EMAIL only (no phone; SMS opted out).
-    assertThat(jdbc.queryForObject("select count(*) from delivery", Integer.class)).isEqualTo(4);
+    // user-email-only EMAIL only (no phone), user-sms-optout EMAIL + SMS (SMS opted out but
+    // overridden for CRITICAL).
+    assertThat(jdbc.queryForObject("select count(*) from delivery", Integer.class)).isEqualTo(5);
   }
 
   @Test
