@@ -19,6 +19,12 @@ class WorkerConfiguration {
     return Jitter.uniform();
   }
 
+  /** Allows every send. */
+  @Bean
+  RateLimiter rateLimiter() {
+    return RateLimiter.ALLOW_ALL;
+  }
+
   @Bean
   RetryPolicy retryPolicy(WorkerProperties properties, Jitter jitter) {
     return new RetryPolicy(properties.maxAttempts(), properties.backoffBase(), jitter);

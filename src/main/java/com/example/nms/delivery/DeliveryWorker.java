@@ -31,6 +31,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.domain.Limit;
@@ -75,8 +76,10 @@ public class DeliveryWorker {
   private final DeliveryMetrics metrics;
   private final Clock clock;
   private final WorkerProperties properties;
+  private final RateLimiter rateLimiter;
   private volatile boolean stopping;
 
+  /** Without a rate limit. */
   DeliveryWorker(
       DeliveryRepository deliveries,
       NotificationRepository notifications,
@@ -87,6 +90,31 @@ public class DeliveryWorker {
       DeliveryMetrics metrics,
       Clock clock,
       WorkerProperties properties) {
+    this(
+        deliveries,
+        notifications,
+        recipients,
+        providers,
+        outcomes,
+        retryPolicy,
+        metrics,
+        clock,
+        properties,
+        RateLimiter.ALLOW_ALL);
+  }
+
+  @Autowired
+  DeliveryWorker(
+      DeliveryRepository deliveries,
+      NotificationRepository notifications,
+      RecipientRepository recipients,
+      ProviderRegistry providers,
+      DeliveryOutcomes outcomes,
+      RetryPolicy retryPolicy,
+      DeliveryMetrics metrics,
+      Clock clock,
+      WorkerProperties properties,
+      RateLimiter rateLimiter) {
     this.deliveries = deliveries;
     this.notifications = notifications;
     this.recipients = recipients;
@@ -96,6 +124,7 @@ public class DeliveryWorker {
     this.metrics = metrics;
     this.clock = clock;
     this.properties = properties;
+    this.rateLimiter = rateLimiter;
   }
 
   /**
@@ -250,6 +279,11 @@ public class DeliveryWorker {
     if (address == null) {
       return failBeforeSend(delivery, notification, NO_ADDRESS, now);
     }
+    Optional<Instant> retryAt =
+        rateLimiter.acquire(notification.getSourceSystem(), delivery.getChannel(), now);
+    if (retryAt.isPresent()) {
+      return new Step.Done(defer(delivery, retryAt.get(), now));
+    }
     if (deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 0) {
       log.debug("Delivery {} claimed by another worker", delivery.getId());
       return new Step.Done(false);
@@ -310,6 +344,23 @@ public class DeliveryWorker {
     } catch (RuntimeException e) {
       log.error("Delivery {} could not be postponed", delivery.getId(), RedactedThrowable.of(e));
     }
+  }
+
+  /**
+   * Moves the row's due time to {@code until} without a claim: status and attempts unchanged, no
+   * audit (not a state change). Returns {@code false}: no attempt or final state was written.
+   */
+  private boolean defer(Delivery delivery, Instant until, Instant now) {
+    int moved =
+        deliveries.postpone(
+            delivery.getId(), delivery.getStatus(), delivery.getVersion(), until, now);
+    log.debug(
+        "Delivery {} on {} rate limited; {} to {}",
+        delivery.getId(),
+        delivery.getChannel(),
+        moved == 1 ? "deferred" : "row changed meanwhile, not deferred",
+        until);
+    return false;
   }
 
   private boolean expire(Delivery delivery, Notification notification, Instant now) {
