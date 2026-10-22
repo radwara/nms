@@ -260,3 +260,71 @@ Existing greenfield tests expected to change: **none**.
 | D7 vocabulary | `overallStatus` `SUPPRESSED`; audit `SUPPRESSED` + `DUPLICATE_EVENT` | Accepted |
 | D8 race | Documented limitation; advisory lock as production path | Accepted |
 | D9 retention | Independent settings | Accepted |
+
+## Execution
+
+Code PR on `feat/14-event-dedup`, from `v0.1.0-greenfield`.
+
+| # | Commit | Content |
+|---|---|---|
+| 1 | `3d9a72c` refactor(intake): add event dedup and status seams, no-op | **Behaviour-preserving refactor.** `SubmittedNotification.outcome()` (always `ACCEPTED`) mapped by `SubmitResponse`; new-submission branch extracted to `IntakeService.create`; package-private `EventDedup` returning no duplicates; `OverallStatus.derive(boolean suppressed, ...)` with the 3-arg form delegating. `./mvnw -B clean verify` green (273 unit, 249 integration) |
+| 2 | `c21c02c` feat(db): V3 notification dedup columns and index | `V3__event_dedup.sql`, `Notification` fields and overload constructor |
+| 3 | `99dc84d` feat(intake): suppress repeated events within the dedup window | `ContentHash`, `DedupProperties`, `EventDedup` lookup, suppressed rows, audits, `IntakeMetrics`, config |
+| 4 | `c50e693` feat(api): SUPPRESSED in submit response, status, and audit | `SUPPRESSED` overall status, `duplicateOf` in status |
+| 5 | `5ebacd7` feat(demo): event dedup step with a suppressed repeat | `scripts/demo.sh` step 6 |
+| 6-9 | docs | ADR-0006, `architecture.md`, A-04 / A-35 / A-36 / A-39, `requirements.md`, README |
+
+Zero test changes in the refactor commit:
+
+```
+$ git diff --stat v0.1.0-greenfield..3d9a72c -- src/test
+(empty)
+```
+
+Greenfield tests changed: none. Three files gained new methods only, as planned in section 6 (`git diff v0.1.0-greenfield -- src/test` has no removed lines): `OverallStatusTest`, `SubmitStatementsIT`, `SchemaMigrationIT`.
+
+Deviations from this analysis: none in behaviour. Small additions: `SubmittedNotification.Outcome` enum carries the outcome; `RequestHash.sha256Hex` is shared with `ContentHash`; the optional `EventDedupRaceIT` is included.
+
+| PR | Review | Findings | Outcome |
+|---|---|---|---|
+| _TBD_ | _TBD_ | _TBD_ | _TBD_ |
+
+## Validation
+
+| Test | Covers |
+|---|---|
+| `ContentHashTest` | Known vector, 64 lowercase hex; ignores event, type, recipients, channels, priority, times; changes on subject, body, severity; no trimming; `("ab","c")` != `("a","bc")` |
+| `DedupPropertiesTest` | Defaults `true` / `24h`; binding; zero or negative window fails startup |
+| `OverallStatusTest` (new methods) | `SUPPRESSED` wins over `SCHEDULED`, `NOT_ROUTED`, any deliveries; `suppressed = false` equals the greenfield table |
+| `SubmitResponseTest` | `ACCEPTED` item byte-identical to greenfield (no `duplicateOf`); `SUPPRESSED` item carries it |
+| `EventDedupIT` | Suppressed row, `duplicate_of`, same hash, no deliveries, `SUPPRESSED` / `DUPLICATE_EVENT` audits; different subject or body, `WARNING` -> `CRITICAL`, other type / recipient / source / event delivered; window strict (`window - 1µs` suppressed, `window` delivered); anchored on the original (20h suppressed, 25h delivered); `NOT_ROUTED` original anchors, channels not in key; pre-V3 row (null hash) never anchors; mixed batch order and routing; fully suppressed; replay after the window identical, no new `SUPPRESSED`; 409 / 422 before dedup; no content or hash in logs or audit |
+| `EventDedupDisabledIT` | `enabled=false`: repeat delivered, no dedup query, hash still written |
+| `SubmitStatementsIT` (new method) | 100 recipients: one dedup lookup per submission, 0 entity loads, <= 25 statements |
+| `IntakeMetricsIT` | `nms.notifications.submitted{outcome}` per notification on commit; replay and rollback not counted |
+| `SchemaMigrationIT` (new method) | V3 applied; nullable columns; index column order |
+| `SubmitDedupIT` | HTTP: mixed batch shape; all suppressed 202, replay 200 same body; status `SUPPRESSED`, `deliveries: []`, `duplicateOf`; original `duplicateOf: null`; audit API; other tenant 404 and never suppressed; worker sends nothing for the suppressed row |
+| `EventDedupRaceIT` | Pins D8: two overlapping repeats under different keys are both accepted |
+
+`./mvnw -B clean verify`: 309 unit, 270 integration, 0 failures.
+
+Demo (`scripts/demo.sh` against the dev-profile jar), step 6:
+
+```
+== 6. Event dedup: same event and message under a new key is suppressed; a new message is delivered
+   POST /api/v1/notifications  key=demo-1792643895-24833-dedup-1  -> 202
+        user-ok ACCEPTED 0c4fd20d-...
+   POST /api/v1/notifications  key=demo-1792643895-24833-dedup-2  -> 202
+        user-ok SUPPRESSED a13d0139-...  duplicateOf=0c4fd20d-...
+   POST /api/v1/notifications  key=demo-1792643895-24833-dedup-3  -> 202
+        user-ok ACCEPTED fa914b5d-...
+   GET  /api/v1/notifications/a13d0139-...  -> 200  user-ok  overallStatus=SUPPRESSED  requestedChannels=none  duplicateSubmissions=0  duplicateOf=0c4fd20d-...
+   GET  /api/v1/notifications/a13d0139-.../audit  -> 200
+        SUPPRESSED
+   GET  /api/v1/notifications/0c4fd20d-.../audit  -> 200
+        ACCEPTED ROUTED(EMAIL) ROUTED(SMS) QUEUED(EMAIL) QUEUED(SMS) DUPLICATE_EVENT SENT(EMAIL)
+        SENT(SMS) DELIVERED(EMAIL) DELIVERED(SMS)
+   GET  /api/v1/notifications/fa914b5d-...  -> 200  user-ok  overallStatus=DELIVERED  requestedChannels=none  duplicateSubmissions=0
+   OK
+...
+Demo passed: 9 steps.
+```
