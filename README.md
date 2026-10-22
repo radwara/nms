@@ -15,7 +15,7 @@ Requires Java 21. No other installs.
 ./mvnw spring-boot:run   # http://localhost:8080/actuator/health
 ```
 
-Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
+Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Outbound sends are rate limited per source system and channel (`nms.rate-limit.*`: EMAIL 600, SMS 60, other channels 30 per minute; ADR-0007). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
 
 ## Run the demo
 
@@ -85,6 +85,6 @@ Demo passed: 9 steps.
 - Decisions: [`docs/adr/`](docs/adr/)
 - Requirements and assumptions: [`docs/requirements.md`](docs/requirements.md), [`docs/ambiguity-log.md`](docs/ambiguity-log.md)
 - Process: [`docs/process.md`](docs/process.md)
-- Scenarios: [`docs/scenarios/greenfield.md`](docs/scenarios/greenfield.md), [`docs/scenarios/brownfield.md`](docs/scenarios/brownfield.md)
+- Scenarios: [`docs/scenarios/greenfield.md`](docs/scenarios/greenfield.md), [`docs/scenarios/brownfield.md`](docs/scenarios/brownfield.md), [`docs/scenarios/brownfield-2.md`](docs/scenarios/brownfield-2.md)
 
 Full README (setup, reviewer guide, limitations) lands with #16.
