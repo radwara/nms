@@ -64,7 +64,7 @@ Gaps and unclear points in the spec, with the assumption taken. `Proposed` = dra
 | A-45 | Retry after vendor acceptance? | Never. Retries cover only failed send calls; after a vendor 200 the vendor owns retries; later FAILED/BOUNCED is final (#4) | Accepted |
 | A-46 | Webhook authentication | Shared secret token per provider in `X-Webhook-Token`; vendor signature verification is the production path. Engineer chose this over HMAC to keep the prototype simple (#4) | Accepted |
 | A-47 | Callback for a delivery not yet sent or between retries (`PENDING`, `RETRY_SCHEDULED`), e.g. a vendor that accepted a send we classified as `TIMEOUT` | Not applied; audited `CALLBACK_IGNORED` (`while RETRY_SCHEDULED; event ...`). ADR-0003 applies callbacks to `SENDING`/`SENT` only; the retry resends with the same `deliveryId`, which the vendor dedupes (#11) | Proposed |
-| A-48 | Late callback for a delivery that expired after a lease reclaim (it may have been sent) | Stays `EXPIRED` (final states never change); audited `CALLBACK_IGNORED` with `late after expiry; event ...`, so the vendor's outcome stays in the history (#11, from the #10 review) | Accepted |
+| A-48 | Late callback for a delivery that expired after a lease reclaim (it may have been sent) | Stays `EXPIRED` (final states never change); audited `CALLBACK_IGNORED` with `late after expiry; event ...`, so the vendor's outcome stays in the history (#11, from the #10 review) | Proposed |
 | A-49 | Failure reason for a vendor `FAILED` callback | `CALLBACK_FAILED` (bounce: `BOUNCED`). The vendor's `reasonCode` is restricted to code characters and audited, not stored on the delivery (#11) | Proposed |
 
 ## Ambiguous scenario candidate

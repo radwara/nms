@@ -33,7 +33,7 @@ flowchart LR
 | Routing | Resolve channels per recipient from request, preferences, and policy |
 | Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire |
 | Provider adapters | One per channel: send call, error classification, callback event mapping |
-| Webhook handler | Authenticate callback, dedupe, apply final status |
+| Webhook handler | Authenticate (token filter) and validate the callback, hand it to `DeliveryCallbacks` in `delivery`, which dedupes by state and applies the final status |
 | Status + audit | Read models; overall status derived on read |
 | Directory | Seeded recipients, contact addresses, channel preferences |
 
@@ -148,7 +148,9 @@ One generic callback format for all simulated providers. We pass our `deliveryId
 - Dedupe by state: only a `SENDING` or `SENT` delivery of the same provider changes (`SENDING` covers a callback that beats our `SENT` write). Everything else is audited `CALLBACK_IGNORED` with the reason and event, e.g. `already DELIVERED; event FAILED`, `provider mismatch; event DELIVERED`, `while RETRY_SCHEDULED; event DELIVERED` (A-47), `late after expiry; event DELIVERED` (A-48).
 - `finalized_at` is our receive time; `occurredAt` is validated but not stored, so vendor clock skew cannot reorder history.
 - Response `200` with no body for applied and ignored events, so vendors do not retry. Unknown `deliveryId`: `200`, logged at INFO, no audit (no source system to file it under), no counter.
-- `delivery.DeliveryCallbacks.apply` is the only callback writer: conditional update, audit, and (after commit) `nms.deliveries.outcome` in one transaction. The webhook controller only binds and validates.
+- `delivery.DeliveryCallbacks.apply` is the only callback writer: row lock, conditional update, audit, and (after commit) `nms.deliveries.outcome` in one transaction. The webhook controller only binds and validates.
+- The row is locked (`select ... for update`) before the clock is read, so a worker `SENT` write that commits first is always earlier: `finalized_at >= sent_at`, and the history reads `SENT`, then the callback's event.
+- `provider_message_id` is unique per provider. If the delivery has none and another delivery of that provider already holds the callback's id, the outcome still applies without the id, and the audit detail says `message id conflict` (still `200`).
 - Mapping real vendor payloads (event names, batching, signatures) is production work inside each provider adapter.
 
 ### Errors
@@ -483,7 +485,7 @@ sequenceDiagram
 ```
 
 - One single-threaded poller. Each claim is a conditional update committed before the send, so two workers can never send the same delivery.
-- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id` and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
+- Claim and outcome writes are conditional on `id`, expected `status`, and `version`; callback writes only on `id`, `provider`, and `status in (SENDING, SENT)`, so a callback racing the worker's `SENT` write still applies. Every write increments `version` and sets `updated_at`. Zero rows updated means another writer won. A slow worker whose lease was reclaimed cannot overwrite the newer state: the reclaim bumped `version`.
 - `claimed_at` is used only for the lease reclaim range check (`claimed_at < now - lease`), never as a token.
 - The lease is longer than the provider timeout (`nms.worker.send-timeout`; startup fails otherwise). A delivery stuck in `SENDING` past the lease (crash mid-send) becomes claimable again; the resend reuses the same provider idempotency key.
 - The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
@@ -522,7 +524,7 @@ sequenceDiagram
     participant D as Database
     V->>H: POST /webhooks/{provider} (X-Webhook-Token)
     H->>H: authenticate (filter), validate body
-    H->>D: DeliveryCallbacks.apply (one transaction)
+    H->>D: DeliveryCallbacks.apply (one transaction, row locked first)
     alt unknown deliveryId
         D-->>H: UNKNOWN (logged)
     else provider differs from the token's
@@ -578,7 +580,7 @@ nms:
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health` (database only; the worker is not part of health) |
-| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
+| Metrics | `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.

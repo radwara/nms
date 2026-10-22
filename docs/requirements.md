@@ -30,7 +30,7 @@ The `Test` column is filled in as items are implemented; it becomes the traceabi
 | FR-5.1 | Bounded retry for retryable delivery failures | 4.5 | `RetryPolicyTest`, `DeliveryWorkerIT` |
 | FR-5.2 | Failure classes are distinguished: transient, permanent rejection, invalid recipient, rate limit, timeout, auth error | 4.5 | `SimulatedProviderTest`, `RetryPolicyTest`, `DeliveryWorkerIT` |
 | FR-6.1 | Audit records: accepted/rejected, routing decision, delivery queued/attempted/succeeded/failed, retry scheduled | 4.9 | Accepted: `SubmitNotificationIT`, `IntakeServiceIT`; rejected: `SubmitRejectionAuditIT`, `AuditRecorderIT`; routing decision and queued: `RoutingIT`; attempted, succeeded, failed, retry scheduled: `DeliveryWorkerIT`; delivered/failed by callback: `DeliveryCallbacksIT`; audit API order and codes only: `NotificationStatusIT` |
-| FR-6.2 | Audit excludes unnecessary sensitive content and credentials | 4.9 | `SubmitRejectionAuditIT`, `SubmitValidationIT`, `AuditRecorderIT` |
+| FR-6.2 | Audit excludes unnecessary sensitive content and credentials | 4.9 | `SubmitRejectionAuditIT`, `SubmitValidationIT`, `AuditRecorderIT`, `NotificationStatusIT` (audit API: codes only), `ProviderCallbackIT` (`reasonCode` limited to code characters, values not echoed) |
 
 ## Non-functional (from sections 6-7)
 
