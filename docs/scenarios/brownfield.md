@@ -2,7 +2,7 @@
 
 - Issue: #14. Requirements: SC-2, FR-4.3, FR-4.4. Ambiguity: A-04, A-35, A-36.
 - Status: **Revised after review; engineer decisions recorded below.** No code is written until this document is merged.
-- Baseline: `main` at `be7ce96` (#6-#10, #12 merged). Status, audit and callback APIs (#11) are not merged yet; their rows use the planned contracts in `architecture.md` and the issue body. Re-check this analysis against the `v0.1.0-greenfield` tag before the code PR.
+- Baseline: `main` at `be7ce96` (#6-#10, #12 merged); status, audit and callback APIs (#11) merged later at `3161dc7`, and their rows are re-checked against it (F1 decisions, section 4). Re-check this analysis against the `v0.1.0-greenfield` tag before the code PR.
 
 ## 1. Change
 
@@ -131,7 +131,7 @@ Per-item `status` gains `SUPPRESSED`, plus `duplicateOf` (omitted when null).
 | Where | Decision |
 |---|---|
 | `overallStatus` | New `SUPPRESSED`, **first** row of the derivation table (before `SCHEDULED` and `NOT_ROUTED`): `duplicate_of` set -> `SUPPRESSED`, `deliveries: []` |
-| Status body (#11) | Adds `duplicateOf` (omitted when null). `duplicateSubmissions` keeps its #11 meaning (same-key replays of this notification) |
+| Status body (#11) | Adds `duplicateOf`, serialized as `null` when not suppressed, like `requestedChannels` (status top-level fields are always present; the submit item keeps omitting it). `duplicateSubmissions` keeps its #11 meaning (same-key replays of this notification) |
 | Audit on the suppressed row | `SUPPRESSED`, detail `duplicate of <originalId>`. Its only submit-time event: no `ACCEPTED`, no routing events |
 | Audit on the original | `DUPLICATE_EVENT`, detail `suppressed <newId>`. Makes the duplicate visible from the original's history, like `DUPLICATE_SUBMISSION` for replays |
 
@@ -171,12 +171,13 @@ Caveats for b-d (none applies to a):
 | Intake | Compute `content_hash` once per submission. After `claimKey`: one projection query `select recipientId, id ... where sourceSystem, eventId, type, contentHash, recipientId in (:ids), createdAt > :since, duplicateOf is null order by createdAt` (earliest original per recipient). Build rows with `contentHash` and `duplicateOf`; `ACCEPTED` for originals, `SUPPRESSED` + `DUPLICATE_EVENT` for duplicates; route originals only. Replay projection adds `duplicateOf`. Lookup and split live in a package-private `EventDedup` class in `intake` (introduced by the refactor commit), so `IntakeService` does not grow and no feature package is added | `IntakeService`, new `EventDedup`, new `ContentHash` (package-private, next to `RequestHash`), `Notification` (new fields; existing constructor kept, overload added), `NotificationRepository`, `SubmittedNotification`, new `DedupProperties` in `IntakeConfiguration` |
 | Routing | None. `RoutingStep.route` already receives "the new notifications"; intake passes only originals. All suppressed -> empty list (existing early return) | none |
 | API | `SubmitResponse.Item` maps outcome to `ACCEPTED` / `SUPPRESSED`, `duplicateOf` with `@JsonInclude(NON_NULL)`. No new request fields, no validator change, `RequestHash` unchanged (so live idempotency records keep matching after deploy) | `SubmitResponse`, `NotificationController` (none if mapping stays in `SubmitResponse`) |
-| Status / audit (#11) | `overallStatus` `SUPPRESSED` first; `duplicateOf` in status body. Audit read unchanged (`occurred_at, id`); new types `SUPPRESSED`, `DUPLICATE_EVENT` in `AuditEventType` | #11 status mapper and derivation; `AuditEventType`, `AuditRecorder` (two methods, `MANDATORY` like the rest) |
+| Status / audit (#11) | `overallStatus` `SUPPRESSED` first via `OverallStatus.derive(boolean suppressed, scheduledAt, now, deliveries)`; `duplicateOf` in status body (null when not suppressed). Audit read unchanged (`occurred_at, id`); new types `SUPPRESSED`, `DUPLICATE_EVENT` in `AuditEventType` | `OverallStatus`, `NotificationStatus`, `StatusResponse`; `AuditEventType`, `AuditRecorder` (two methods, `MANDATORY` like the rest) |
 | Callbacks (#11) | None: callbacks resolve by `deliveryId`; suppressed rows have no deliveries, so no callback can reach them | none |
 | Worker (#10) | None: suppressed rows have no deliveries, and the poll reads only `delivery` | none |
-| Metrics | Counter `nms.notifications.submitted{outcome=accepted\|suppressed}`, incremented per notification after commit (gives the denominator). Alert on the suppression ratio `suppressed / (accepted + suppressed)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. No `type` / `eventId` tags (caller-defined, unbounded cardinality) | `IntakeService` (after-commit hook already exists) |
+| Metrics | Counter `nms.notifications.submitted{outcome=accepted\|suppressed}`, incremented per notification after commit (gives the denominator). Alert on the suppression ratio `suppressed / (accepted + suppressed)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. No `type` / `eventId` tags (caller-defined, unbounded cardinality) | New `IntakeMetrics` class in `intake` (like `DeliveryMetrics` in `delivery`), called from `IntakeService`'s existing after-commit hook |
 | Logs | After-commit line keeps its prefix and appends the suppressed count: `Submission {} accepted: {} notifications, {} suppressed, for source system {}` (`accepted` counts originals). No `eventId`, hash, or recipient ids beyond what greenfield logs | `IntakeService` |
 | Security | Key includes `source_system`: no cross-tenant suppression. `content_hash` is an unsalted SHA-256 of short, partly predictable text (guessable by brute force), so it is never returned, logged, or audited; production path: HMAC with a server-held key. No new PII; audit detail is ids | none |
+| F1 decisions (#11 re-check at `3161dc7`) | (1) `OverallStatus` gains `derive(boolean suppressed, Instant scheduledAt, Instant now, Collection<DeliveryStatus> deliveries)`; the existing 3-arg form delegates with `suppressed = false`, so `OverallStatusTest` is unchanged (new cases are additions). (2) `duplicateOf` in the status body is serialized as `null`, like `requestedChannels`. (3) Metrics live in a new `IntakeMetrics` class in `intake` | see rows above |
 | Docs | `architecture.md` (submit sequence, response, status table, audit types, data model incl. `content_hash` and its canonical input, config, metrics + "how to operate" alert, limitations incl. D8 caveats); A-04 aligned to D1; A-35 gains the event-level boundary (one original per D1 key per window); A-36 notes the dedup window is separate from key retention; new row A-39 (window, precedence, content hash); ADR-0006 event dedup (D1, D5, D8 with rejected options), linked from ADR-0002; `requirements.md` Test column (SC-2, FR-4.3, FR-4.4); README and demo script step | docs |
 
 ## 5. Regression risk
@@ -202,7 +203,9 @@ Existing greenfield tests expected to change: **none**.
 | `NotificationMappingIT`, `TestEntities` | Existing `Notification` constructor kept |
 | `PackageDependencyTest` | `EventDedup` and `ContentHash` stay in `intake`; no new feature package |
 | `SchemaMigrationIT` | Asserts versions contain 1 and 2; 3 is added |
-| #10 / #11 tests | To confirm at the tag: an exhaustive `overallStatus` derivation test gains a `SUPPRESSED` row (addition, not change) |
+| #10 / #11 tests | `OverallStatusTest` calls the 3-arg `derive`, which delegates with `suppressed = false` (F1); `SUPPRESSED` cases are added in a new method, no existing case changes. `NotificationStatusIT` asserts named fields, so a new `duplicateOf: null` field changes none of its assertions |
+| `GreenfieldE2EIT` | Each flow uses a different recipient, so no two accepted submissions share a D1 key; the duplicate flow reuses its `Idempotency-Key` (a replay, which dedup never sees) |
+| `scripts/demo.sh` (CI) | Each step has its own `eventId` (`<run>-<step>`) and every run a new run id, so no step can suppress another; the brownfield step adds its own `eventId` |
 
 ## 6. Test plan
 

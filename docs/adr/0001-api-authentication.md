@@ -69,7 +69,7 @@ Not secrets and deliberately not random. Hashes live in `application-dev.yml` an
 
 ## Production path
 
-Production systems in this domain use HMAC request signing (timestamp + nonce, D) or JWTs (C). Authentication sits behind one filter and one authenticator class, so either replacement touches only those, not business code. Key storage moves from config to a secrets store or database with an issuance/rotation API.
+Production systems in this domain use HMAC request signing (timestamp + nonce, D) or JWTs (C). Authentication sits in two filters (`ApiKeyFilter`, `WebhookTokenFilter`) on a shared `CredentialFilter` base and two authenticators (`ApiKeyAuthenticator`, `WebhookTokenAuthenticator`), so either replacement touches only those, not business code. Key storage moves from config to a secrets store or database with an issuance/rotation API.
 
 ## Revision (2026-10-20, design review)
 

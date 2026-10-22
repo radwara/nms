@@ -40,6 +40,36 @@ jobs:
           path: target/site/jacoco/
           if-no-files-found: error
 
+      - name: Start app (dev profile) and wait for health UP
+        run: |
+          SPRING_PROFILES_ACTIVE=dev NMS_DATA_DIR="$(mktemp -d)" \
+            nohup java -jar target/nms-*.jar > "$RUNNER_TEMP/nms-demo.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/nms-demo.pid"
+          for _ in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/actuator/health | jq -e '.status == "UP"' > /dev/null 2>&1; then
+              exit 0
+            fi
+            kill -0 "$(cat "$RUNNER_TEMP/nms-demo.pid")" 2> /dev/null || { echo "App exited during startup"; exit 1; }
+            sleep 1
+          done
+          echo "App not UP after 60s"
+          exit 1
+
+      - name: Demo script smoke run
+        timeout-minutes: 5
+        run: scripts/demo.sh
+
+      - name: Stop app
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/nms-demo.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/nms-demo.pid")" 2> /dev/null || true
+          fi
+          if [ "${{ job.status }}" != "success" ] && [ -f "$RUNNER_TEMP/nms-demo.log" ]; then
+            echo "App log (last 200 lines):"
+            tail -n 200 "$RUNNER_TEMP/nms-demo.log"
+          fi
+
       - name: Build Docker image
         run: docker build -t nms:ci .
 
