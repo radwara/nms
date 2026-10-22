@@ -2,7 +2,7 @@
 
 - Issues: #6-#13 (milestone Greenfield). Requirements: SC-1, FR-1 - FR-6, NFR-1 - NFR-6, D-1.
 - Before code: requirements and ambiguity log at bootstrap (`9d46fb9`); architecture and ADR-0001 - ADR-0005 merged via #3, #5; backlog reviewed independently and re-scoped before #6 ([backlog review](https://github.com/radwara/nms/issues/6#issuecomment-6308373952)).
-- Result: submit -> route -> queue -> send with retries -> callback -> status and audit, runnable with `scripts/demo.sh`. Tag `v0.1.0-greenfield` after #13 merges.
+- Result: submit -> route -> queue -> send with retries -> callback -> status and audit, runnable with `scripts/demo.sh`. Tagged `v0.1.0-greenfield` after #13 merged.
 
 ## 1. Decomposition
 
@@ -34,7 +34,7 @@ One branch and PR per issue; implementation by an implementer subagent from an o
 | [#27](https://github.com/radwara/nms/pull/27#issuecomment-6325765783) | #9 | 10 | Bug, performance | 6 | 3 | 1 engineer decision, 2 declined | 153 + 165 |
 | [#32](https://github.com/radwara/nms/pull/32#issuecomment-6328806265) | #10 | 19 | Bug, architecture, performance | 12 | 10 | 1 declined, 1 carried to #11 | 224 + 212 |
 | [#34](https://github.com/radwara/nms/pull/34#issuecomment-6332101203) | #11 | 18 | Bug, general | 11 | 7 | 2 engineer decisions, 1 documented limitation, 1 carried to #14 | 270 + 245 |
-| #35 | #13 | 15 | Architecture drift (code vs `architecture.md`, ADRs), grader review (README, demo, traceability) | 30 | 30 | Record on the PR | 273 + 249 |
+| #35 | #13 | 15 | Architecture drift (code vs `architecture.md`, ADRs), final-reviewer pass (README, demo, traceability) | 30 | 30 | Record on the PR | 273 + 249 |
 
 Total for #6-#11: 81 findings, 58 fixed before merge.
 
@@ -76,16 +76,16 @@ Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are li
 | #26 ([check order](https://github.com/radwara/nms/pull/26#discussion_r4339680007)) | Idempotency lookup before time-based 422s: a retry of an accepted request replays even after `expiresAt` |
 | #26 ([409](https://github.com/radwara/nms/pull/26#discussion_r4339707709)) | Concurrent request on the same key -> 409 / 4092 with `Retry-After`: a client conflict, not a server error |
 | #27 ([double audit](https://github.com/radwara/nms/pull/27#discussion_r4342566572)) | Keep both events when an escalation is withheld after an earlier removal, so each routing decision is recorded |
-| #15 ([A-30](https://github.com/radwara/nms/issues/15#issuecomment-6327907571)) | CRITICAL will override opt-out in the ambiguous scenario; greenfield keeps the opt-out-wins baseline until then |
+| #15 ([A-30](https://github.com/radwara/nms/issues/15#issuecomment-6327907571)) | CRITICAL overrides opt-out in the ambiguous scenario (PR #45); greenfield kept the opt-out-wins baseline until then |
 | #32 ([retry policy](https://github.com/radwara/nms/pull/32#discussion_r4343946188)) | 3 attempts, 500 ms base, equal jitter, `Retry-After` cap 60 s, never retry 4xx; no default TTL (delivery is async) |
 | #34 ([A-24, A-47 - A-49](https://github.com/radwara/nms/pull/34#discussion_r4344290584)) | `NOT_ROUTED` before `SCHEDULED`; callbacks apply to `RETRY_SCHEDULED` (retry cancelled), not `PENDING`; `EXPIRED` stays final, late callbacks audited; `CALLBACK_FAILED` renamed `PROVIDER_FAILED` |
 
 ## 5. Limitations carried forward
 
-| Limitation | Where it goes |
+| Limitation | Outcome |
 |---|---|
-| A different `Idempotency-Key` for the same event and message notifies the user again | #14 (brownfield: event-level dedup) |
-| Opt-out wins over a CRITICAL escalation (A-30 baseline) | #15 (ambiguous) |
+| A different `Idempotency-Key` for the same event and message notifies the user again | Fixed in #14 (brownfield: event-level dedup, PR #41) |
+| Opt-out wins over a CRITICAL escalation (A-30 baseline) | Changed in #15 (ambiguous: CRITICAL overrides opt-out, PR #45) |
 | Single instance, single-threaded poller, H2; scaling path documented, not built | architecture.md "Scaling path" |
 | `SENT` without a callback stays `SENT`; simulated callbacks are one attempt, no retry | By design (ADR-0003) |
 | A delivery that expired after a lease reclaim may have been sent; a late callback is audited, not applied (A-48) | Documented |
@@ -93,4 +93,4 @@ Other caught-by-build issues (formatter on JDK 21, Boot 4 metrics module) are li
 | Content stored in plaintext; no purge for idempotency rows or audit | Production path (architecture.md) |
 | `/actuator/prometheus` needs no key in the prototype | Internal management port in production |
 | Real vendor payloads and signatures not mapped: `api.CallbackRequestValidator` parses the one generic format, `DeliveryCallbacks` maps event to status | Production: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built) |
-| Docker image built and checked in CI only | README (#16) |
+| Docker image built and checked in CI only | README, Docker section |
