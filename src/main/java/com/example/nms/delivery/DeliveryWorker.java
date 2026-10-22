@@ -22,6 +22,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -40,9 +41,10 @@ import org.springframework.stereotype.Component;
 /**
  * Sends due deliveries (ADR-0004). One poll reads each due status separately, merges by priority
  * then due time, and works the best {@code batch-size} rows one by one: expire or fail a row that
- * cannot be sent (no claim), defer a rate-limited one to the next window (no claim, ADR-0007), or
- * claim (committed) then send outside any transaction then write the outcome (conditional on the
- * claim's version). Each row runs under its own trace id. Addresses and content are never logged.
+ * cannot be sent (no claim), defer a rate-limited source's due rows on that channel to the next
+ * window (one set-based postpone, no claim, ADR-0007), or claim (committed) then send outside any
+ * transaction then write the outcome (conditional on the claim's version). Each row runs under its
+ * own trace id. Addresses and content are never logged.
  */
 @Component
 public class DeliveryWorker {
@@ -65,6 +67,7 @@ public class DeliveryWorker {
   private static final Comparator<Delivery> BEST_FIRST =
       Comparator.comparing((Delivery d) -> d.getPriority().code())
           .thenComparing(Delivery::getNextAttemptAt)
+          .thenComparing(Delivery::getCreatedAt)
           .thenComparing(Delivery::getId);
 
   private final DeliveryRepository deliveries;
@@ -169,6 +172,8 @@ public class DeliveryWorker {
             recipients.findAllById(ids(notificationsById.values(), Notification::getRecipientId)),
             Recipient::getId);
 
+    // Keys denied in this poll: their due rows are already deferred; skip them, no more writes.
+    Set<RateLimiter.Key> throttled = new HashSet<>();
     int worked = 0;
     for (Delivery delivery : batch) {
       if (stopping()) {
@@ -177,7 +182,7 @@ public class DeliveryWorker {
       }
       TraceIds.Scope scope = TraceIds.open(TraceIds.newId());
       try {
-        if (work(delivery, notificationsById, recipientsById)) {
+        if (work(delivery, notificationsById, recipientsById, throttled)) {
           worked++;
         }
       } finally {
@@ -225,11 +230,12 @@ public class DeliveryWorker {
   private boolean work(
       Delivery delivery,
       Map<UUID, Notification> notificationsById,
-      Map<String, Recipient> recipientsById) {
+      Map<String, Recipient> recipientsById,
+      Set<RateLimiter.Key> throttled) {
     Instant now = clock.instant();
     Step step;
     try {
-      step = prepareAndClaim(delivery, notificationsById, recipientsById, now);
+      step = prepareAndClaim(delivery, notificationsById, recipientsById, throttled, now);
     } catch (RuntimeException e) {
       postpone(delivery, now, e);
       return false;
@@ -256,6 +262,7 @@ public class DeliveryWorker {
       Delivery delivery,
       Map<UUID, Notification> notificationsById,
       Map<String, Recipient> recipientsById,
+      Set<RateLimiter.Key> throttled,
       Instant now) {
     Notification notification = notificationsById.get(delivery.getNotificationId());
     if (notification == null) {
@@ -279,12 +286,29 @@ public class DeliveryWorker {
     if (address == null) {
       return failBeforeSend(delivery, notification, NO_ADDRESS, now);
     }
-    Optional<Instant> retryAt =
-        rateLimiter.acquire(notification.getSourceSystem(), delivery.getChannel(), now);
-    if (retryAt.isPresent()) {
-      return new Step.Done(defer(delivery, retryAt.get(), now));
+    RateLimiter.Key key =
+        new RateLimiter.Key(notification.getSourceSystem(), delivery.getChannel());
+    if (throttled.contains(key)) {
+      return new Step.Done(false);
     }
-    if (deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 0) {
+    Instant windowStart;
+    switch (rateLimiter.acquire(key, now)) {
+      case RateLimiter.Denied denied -> {
+        throttled.add(key);
+        return new Step.Done(defer(key, denied.until(), now));
+      }
+      case RateLimiter.Allowed allowed -> windowStart = allowed.windowStart();
+    }
+    boolean claimed = false;
+    try {
+      claimed =
+          deliveries.claim(delivery.getId(), delivery.getStatus(), delivery.getVersion(), now) == 1;
+    } finally {
+      if (!claimed) {
+        rateLimiter.release(key, windowStart);
+      }
+    }
+    if (!claimed) {
       log.debug("Delivery {} claimed by another worker", delivery.getId());
       return new Step.Done(false);
     }
@@ -347,22 +371,22 @@ public class DeliveryWorker {
   }
 
   /**
-   * Rate limited: moves the row's due time to {@code until} (the window end) without a claim.
-   * Status and attempts unchanged, no audit (not a state change), DEBUG log only. Returns {@code
-   * false}: no attempt or final state was written.
+   * Rate limited: moves every due row of {@code key} to {@code until} (the window end) with one
+   * set-based postpone, without a claim. Status and attempts unchanged, no audit (not a state
+   * change), DEBUG log only. Returns {@code false}: no attempt or final state was written.
    */
-  private boolean defer(Delivery delivery, Instant until, Instant now) {
+  private boolean defer(RateLimiter.Key key, Instant until, Instant now) {
     int moved =
-        deliveries.postpone(
-            delivery.getId(), delivery.getStatus(), delivery.getVersion(), until, now);
-    if (moved == 1) {
-      metrics.deferred(delivery.getChannel(), DeliveryMetrics.RATE_LIMITED);
+        deliveries.postponeDue(
+            key.sourceSystem(), key.channel(), now, now.minus(properties.lease()), until);
+    if (moved > 0) {
+      metrics.deferred(key.channel(), DeliveryMetrics.RATE_LIMITED, moved);
     }
     log.debug(
-        "Delivery {} on {} rate limited; {} to {}",
-        delivery.getId(),
-        delivery.getChannel(),
-        moved == 1 ? "deferred" : "row changed meanwhile, not deferred",
+        "Source system {} on {} rate limited; {} due deliveries deferred to {}",
+        key.sourceSystem(),
+        key.channel(),
+        moved,
         until);
     return false;
   }

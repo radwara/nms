@@ -10,7 +10,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * Outbound rate limit per source system and channel (ADR-0007). Read at startup.
  *
  * @param window length of one fixed window; windows are aligned to multiples of it since the epoch
- * @param perSource sends allowed per source system per window, by channel
+ * @param perSource sends allowed per source system per window, by channel; when not set at all,
+ *     EMAIL 600 and SMS 60 (as in {@code application.yml}); when set, the channels listed
  * @param defaultPerSource the limit of a channel not in {@code perSource}
  */
 @ConfigurationProperties("nms.rate-limit")
@@ -19,9 +20,13 @@ record RateLimitProperties(
     Map<Channel, Integer> perSource,
     @DefaultValue("30") int defaultPerSource) {
 
+  /** {@code per-source} when it is not configured; equals {@code application.yml}. */
+  static final Map<Channel, Integer> DEFAULT_PER_SOURCE =
+      Map.of(Channel.EMAIL, 600, Channel.SMS, 60);
+
   RateLimitProperties {
     require(!window.isNegative() && !window.isZero(), "window");
-    perSource = perSource == null ? Map.of() : Map.copyOf(perSource);
+    perSource = perSource == null ? DEFAULT_PER_SOURCE : Map.copyOf(perSource);
     perSource.forEach((channel, limit) -> require(limit > 0, "per-source." + channel));
     require(defaultPerSource > 0, "default-per-source");
   }

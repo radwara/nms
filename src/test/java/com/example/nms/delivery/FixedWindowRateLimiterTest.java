@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,54 +29,54 @@ class FixedWindowRateLimiterTest {
 
   @Test
   void sendsUnderTheLimitAreAllowed() {
-    assertThat(limiter.acquire("billing", Channel.EMAIL, START)).isEmpty();
-    assertThat(limiter.acquire("billing", Channel.EMAIL, START.plusSeconds(30))).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, START)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, START.plusSeconds(30))).isEmpty();
   }
 
   @Test
   void aSendAtTheLimitIsDeferredToTheWindowEnd() {
     Instant mid = START.plusSeconds(20);
-    limiter.acquire("billing", Channel.EMAIL, mid);
-    limiter.acquire("billing", Channel.EMAIL, mid);
+    acquire(limiter, "billing", Channel.EMAIL, mid);
+    acquire(limiter, "billing", Channel.EMAIL, mid);
 
-    assertThat(limiter.acquire("billing", Channel.EMAIL, mid)).contains(END);
-    assertThat(limiter.acquire("billing", Channel.EMAIL, END.minusNanos(1))).contains(END);
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, mid)).contains(END);
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, END.minusNanos(1))).contains(END);
   }
 
   @Test
   void aDeferredSendIsNotCounted() {
-    limiter.acquire("billing", Channel.EMAIL, START);
-    limiter.acquire("billing", Channel.EMAIL, START);
-    limiter.acquire("billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
 
-    assertThat(limiter.acquire("billing", Channel.EMAIL, END)).isEmpty();
-    assertThat(limiter.acquire("billing", Channel.EMAIL, END)).isEmpty();
-    assertThat(limiter.acquire("billing", Channel.EMAIL, END)).isPresent();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, END)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, END)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, END)).isPresent();
   }
 
   @Test
   void theNextWindowStartsAFreshCount() {
-    limiter.acquire("billing", Channel.EMAIL, START);
-    limiter.acquire("billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
 
-    assertThat(limiter.acquire("billing", Channel.EMAIL, END)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, END)).isEmpty();
   }
 
   @Test
   void sourceSystemsAndChannelsAreCountedSeparately() {
-    limiter.acquire("billing", Channel.EMAIL, START);
-    limiter.acquire("billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
+    acquire(limiter, "billing", Channel.EMAIL, START);
 
-    assertThat(limiter.acquire("billing", Channel.EMAIL, START)).isPresent();
-    assertThat(limiter.acquire("shipping", Channel.EMAIL, START)).isEmpty();
-    assertThat(limiter.acquire("billing", Channel.SMS, START)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, START)).isPresent();
+    assertThat(acquire(limiter, "shipping", Channel.EMAIL, START)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.SMS, START)).isEmpty();
   }
 
   @Test
   void anUnlistedChannelGetsTheDefaultLimit() {
-    assertThat(limiter.acquire("billing", Channel.SMS, START)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.SMS, START)).isEmpty();
 
-    assertThat(limiter.acquire("billing", Channel.SMS, START)).contains(END);
+    assertThat(acquire(limiter, "billing", Channel.SMS, START)).contains(END);
   }
 
   @Test
@@ -83,17 +84,17 @@ class FixedWindowRateLimiterTest {
     FixedWindowRateLimiter tenSeconds =
         new FixedWindowRateLimiter(new RateLimitProperties(Duration.ofSeconds(10), Map.of(), 1));
     Instant at = START.plusSeconds(23);
-    tenSeconds.acquire("billing", Channel.EMAIL, at);
+    acquire(tenSeconds, "billing", Channel.EMAIL, at);
 
-    assertThat(tenSeconds.acquire("billing", Channel.EMAIL, at)).contains(START.plusSeconds(30));
-    assertThat(tenSeconds.acquire("billing", Channel.EMAIL, START.plusSeconds(30))).isEmpty();
+    assertThat(acquire(tenSeconds, "billing", Channel.EMAIL, at)).contains(START.plusSeconds(30));
+    assertThat(acquire(tenSeconds, "billing", Channel.EMAIL, START.plusSeconds(30))).isEmpty();
   }
 
   @Test
   void anOlderInstantIsCountedInTheCurrentWindow() {
-    limiter.acquire("billing", Channel.SMS, END);
+    acquire(limiter, "billing", Channel.SMS, END);
 
-    assertThat(limiter.acquire("billing", Channel.SMS, END.minusSeconds(1)))
+    assertThat(acquire(limiter, "billing", Channel.SMS, END.minusSeconds(1)))
         .contains(END.plus(Duration.ofMinutes(1)));
   }
 
@@ -115,7 +116,7 @@ class FixedWindowRateLimiterTest {
                   go.await();
                   int count = 0;
                   for (int i = 0; i < perThread; i++) {
-                    if (shared.acquire("billing", Channel.EMAIL, START.plusMillis(i)).isEmpty()) {
+                    if (acquire(shared, "billing", Channel.EMAIL, START.plusMillis(i)).isEmpty()) {
                       count++;
                     }
                   }
@@ -132,10 +133,62 @@ class FixedWindowRateLimiterTest {
   }
 
   @Test
+  void aReleasedSlotCanBeTakenAgainInTheSameWindow() {
+    RateLimiter.Key key = new RateLimiter.Key("billing", Channel.EMAIL);
+    limiter.acquire(key, START);
+    RateLimiter.Decision second = limiter.acquire(key, START);
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, START)).isPresent();
+
+    limiter.release(key, ((RateLimiter.Allowed) second).windowStart());
+
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, START)).isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, START)).isPresent();
+  }
+
+  @Test
+  void aReleaseForAPastWindowChangesNothing() {
+    RateLimiter.Key key = new RateLimiter.Key("billing", Channel.EMAIL);
+    RateLimiter.Decision old = limiter.acquire(key, START);
+    acquire(limiter, "billing", Channel.EMAIL, END);
+    acquire(limiter, "billing", Channel.EMAIL, END);
+
+    limiter.release(key, ((RateLimiter.Allowed) old).windowStart());
+
+    assertThat(acquire(limiter, "billing", Channel.EMAIL, END)).isPresent();
+  }
+
+  @Test
+  void aClockThatFallsBackMoreThanOneWindowStartsANewWindow() {
+    Instant later = START.plus(Duration.ofMinutes(5));
+    acquire(limiter, "billing", Channel.SMS, later);
+
+    assertThat(acquire(limiter, "billing", Channel.SMS, START)).as("new window at START").isEmpty();
+    assertThat(acquire(limiter, "billing", Channel.SMS, START)).contains(END);
+  }
+
+  @Test
+  void aClockThatFallsBackAtMostOneWindowCountsInTheCurrentWindow() {
+    acquire(limiter, "billing", Channel.SMS, END);
+
+    assertThat(acquire(limiter, "billing", Channel.SMS, START))
+        .as("exactly one window back")
+        .contains(END.plus(Duration.ofMinutes(1)));
+  }
+
+  @Test
   void anInstantBeforeTheEpochIsAlignedDownwards() {
     Instant before = Instant.EPOCH.minusSeconds(1);
-    limiter.acquire("billing", Channel.SMS, before);
+    acquire(limiter, "billing", Channel.SMS, before);
 
-    assertThat(limiter.acquire("billing", Channel.SMS, before)).contains(Instant.EPOCH);
+    assertThat(acquire(limiter, "billing", Channel.SMS, before)).contains(Instant.EPOCH);
+  }
+
+  /** Empty if allowed, else when the key may send again. */
+  private static Optional<Instant> acquire(
+      FixedWindowRateLimiter limiter, String sourceSystem, Channel channel, Instant now) {
+    return switch (limiter.acquire(new RateLimiter.Key(sourceSystem, channel), now)) {
+      case RateLimiter.Allowed allowed -> Optional.empty();
+      case RateLimiter.Denied denied -> Optional.of(denied.until());
+    };
   }
 }

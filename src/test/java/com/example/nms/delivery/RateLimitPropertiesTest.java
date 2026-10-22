@@ -34,13 +34,14 @@ class RateLimitPropertiesTest {
   }
 
   @Test
-  void withoutSettingsTheWindowIsOneMinuteAndEveryChannelGetsTheDefault() {
+  void withoutSettingsTheJavaDefaultsEqualApplicationYml() {
     runner.run(
         context -> {
           RateLimitProperties properties = context.getBean(RateLimitProperties.class);
           assertThat(properties.window()).isEqualTo(Duration.ofMinutes(1));
-          assertThat(properties.limit(Channel.EMAIL)).isEqualTo(30);
-          assertThat(properties.limit(Channel.SMS)).isEqualTo(30);
+          assertThat(properties.limit(Channel.EMAIL)).isEqualTo(600);
+          assertThat(properties.limit(Channel.SMS)).isEqualTo(60);
+          assertThat(properties.defaultPerSource()).isEqualTo(30);
         });
   }
 

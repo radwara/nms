@@ -54,14 +54,16 @@ class DeliveryMetrics {
         .increment();
   }
 
-  /** A due delivery's next attempt was moved without a claim; {@code reason} is a constant. */
-  void deferred(Channel channel, String reason) {
+  /**
+   * {@code count} due deliveries' next attempt moved without a claim; {@code reason} is a constant.
+   */
+  void deferred(Channel channel, String reason, int count) {
     Counter.builder("nms.delivery.deferred")
         .description("Due deliveries deferred without a claim, by reason")
         .tag("channel", channel.name())
         .tag("reason", reason)
         .register(registry)
-        .increment();
+        .increment(count);
   }
 
   /** Times one poll ({@code nms.worker.poll}). */

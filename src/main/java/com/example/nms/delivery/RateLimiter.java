@@ -2,18 +2,41 @@ package com.example.nms.delivery;
 
 import com.example.nms.common.Channel;
 import java.time.Instant;
-import java.util.Optional;
 
-/** Outbound send limit per source system and channel, checked just before each claim (ADR-0007). */
+/**
+ * Outbound send limit per source system and channel, checked just before each claim (ADR-0007).
+ * Safe for concurrent callers.
+ */
 interface RateLimiter {
 
   /** Allows every send. */
-  RateLimiter ALLOW_ALL = (sourceSystem, channel, now) -> Optional.empty();
+  RateLimiter ALLOW_ALL =
+      new RateLimiter() {
+        @Override
+        public Decision acquire(Key key, Instant now) {
+          return new Allowed(now);
+        }
+
+        @Override
+        public void release(Key key, Instant windowStart) {}
+      };
+
+  /** Takes one send for {@code key} at {@code now}; an allowed send is counted. */
+  Decision acquire(Key key, Instant now);
 
   /**
-   * Takes one send for {@code (sourceSystem, channel)} at {@code now}.
-   *
-   * @return empty if the send may go ahead (it is counted), else when the row may be tried again
+   * Gives back a send {@link Allowed} in the window starting at {@code windowStart} that never
+   * happened (the claim was lost or threw). No effect once that window has passed.
    */
-  Optional<Instant> acquire(String sourceSystem, Channel channel, Instant now);
+  void release(Key key, Instant windowStart);
+
+  record Key(String sourceSystem, Channel channel) {}
+
+  sealed interface Decision permits Allowed, Denied {}
+
+  /** Counted in the window starting at {@code windowStart}. */
+  record Allowed(Instant windowStart) implements Decision {}
+
+  /** Over the limit; the key may send again at {@code until}, the window end. */
+  record Denied(Instant until) implements Decision {}
 }

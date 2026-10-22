@@ -1,5 +1,6 @@
 package com.example.nms.delivery;
 
+import com.example.nms.common.Channel;
 import com.example.nms.common.DeliveryStatus;
 import com.example.nms.common.Priority;
 import jakarta.persistence.LockModeType;
@@ -25,16 +26,17 @@ import org.springframework.transaction.annotation.Transactional;
 public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
 
   /**
-   * Due rows of one status and priority, earliest first. Equality on both leading columns of the
-   * {@code (status, priority, next_attempt_at)} index makes this a range scan that stops after
-   * {@code limit} rows; one query per status and per priority, merged by the worker. Ordering by
-   * priority inside one query would first walk every not-yet-due row of a better priority.
+   * Due rows of one status and priority, earliest first, then oldest first (FIFO among rows a
+   * rate-limit postpone moved to the same instant). Equality on both leading columns of the {@code
+   * (status, priority, next_attempt_at)} index makes this a range scan that stops after {@code
+   * limit} rows; one query per status and per priority, merged by the worker. Ordering by priority
+   * inside one query would first walk every not-yet-due row of a better priority.
    */
   @Query(
       """
       select d from Delivery d
       where d.status = :status and d.priority = :priority and d.nextAttemptAt <= :now
-      order by d.nextAttemptAt
+      order by d.nextAttemptAt, d.createdAt
       """)
   List<Delivery> findDue(
       @Param("status") DeliveryStatus status,
@@ -179,4 +181,32 @@ public interface DeliveryRepository extends JpaRepository<Delivery, UUID> {
       @Param("version") long version,
       @Param("nextAttemptAt") Instant nextAttemptAt,
       @Param("now") Instant now);
+
+  /**
+   * Rate limited: moves every due row of one source system and channel to {@code until} in one
+   * statement, with the conditions of a poll and of {@link #postpone}: {@code PENDING} or {@code
+   * RETRY_SCHEDULED} due by {@code now}, or {@code SENDING} past the lease ({@code claimed_at <
+   * claimedBefore}). Status and attempts unchanged; {@code version} bumped, so a claim or outcome
+   * write with a version read before this changes nothing.
+   */
+  @Transactional
+  @Modifying(clearAutomatically = true, flushAutomatically = true)
+  @Query(
+      """
+      update Delivery d
+      set d.nextAttemptAt = :until, d.version = d.version + 1, d.updatedAt = :now
+      where d.channel = :channel and d.nextAttemptAt <= :now
+        and d.notificationId in
+            (select n.id from Notification n where n.sourceSystem = :sourceSystem)
+        and (d.status in (com.example.nms.common.DeliveryStatus.PENDING,
+                          com.example.nms.common.DeliveryStatus.RETRY_SCHEDULED)
+             or (d.status = com.example.nms.common.DeliveryStatus.SENDING
+                 and d.claimedAt < :claimedBefore))
+      """)
+  int postponeDue(
+      @Param("sourceSystem") String sourceSystem,
+      @Param("channel") Channel channel,
+      @Param("now") Instant now,
+      @Param("claimedBefore") Instant claimedBefore,
+      @Param("until") Instant until);
 }

@@ -143,6 +143,54 @@ class RateLimitIT {
     assertThat(reload(critical).getNextAttemptAt()).isEqualTo(windowEnd);
   }
 
+  @Test
+  void theSetBasedPostponeMovesOnlyTheKeysDueRowsAndBumpsTheirVersion() {
+    Instant now = clock.instant();
+    Delivery pending = queue("billing", "user-ok", now, null);
+    Delivery retry = queue("billing", "user-ok", now.minusSeconds(1), null);
+    Delivery leaseExpired = queue("billing", "user-ok", now.minusSeconds(2), null);
+    Delivery freshClaim = queue("billing", "user-ok", now.minusSeconds(3), null);
+    Delivery future = queue("billing", "user-ok", now.plusSeconds(1), null);
+    Delivery sent = queue("billing", "user-ok", now.minusSeconds(4), null);
+    Delivery otherSource = queue("shipping", "user-ok", now, null);
+    Delivery otherChannel =
+        deliveries.save(
+            delivery(
+                notifications.save(notification("billing", "user-ok", Severity.INFO, null)),
+                Channel.SMS,
+                now));
+    setStatus(retry, "RETRY_SCHEDULED", null);
+    setStatus(leaseExpired, "SENDING", now.minusSeconds(31));
+    setStatus(freshClaim, "SENDING", now.minusSeconds(29));
+    setStatus(sent, "SENT", now.minusSeconds(40));
+    long pendingVersion = reload(pending).getVersion();
+
+    int moved =
+        deliveries.postponeDue(
+            "billing", Channel.EMAIL, now, now.minus(Duration.ofSeconds(30)), windowEnd);
+
+    assertThat(moved).isEqualTo(3);
+    for (Delivery row : List.of(pending, retry, leaseExpired)) {
+      assertThat(reload(row).getNextAttemptAt()).isEqualTo(windowEnd);
+    }
+    assertThat(reload(retry).getStatus()).isEqualTo(DeliveryStatus.RETRY_SCHEDULED);
+    assertThat(reload(leaseExpired).getStatus()).isEqualTo(DeliveryStatus.SENDING);
+    for (Delivery row : List.of(freshClaim, future, sent, otherSource, otherChannel)) {
+      assertThat(reload(row).getNextAttemptAt()).isNotEqualTo(windowEnd);
+    }
+    assertThat(deliveries.claim(pending.getId(), DeliveryStatus.PENDING, pendingVersion, now))
+        .as("a claim with the polled version fails cleanly")
+        .isZero();
+  }
+
+  private void setStatus(Delivery delivery, String status, Instant claimedAt) {
+    jdbc.update(
+        "update delivery set status = ?, claimed_at = ? where id = ?",
+        status,
+        claimedAt == null ? null : java.sql.Timestamp.from(claimedAt),
+        delivery.getId());
+  }
+
   private Delivery queue(String sourceSystem, String recipient, Instant dueAt, Instant expiresAt) {
     Notification notification =
         notifications.save(notification(sourceSystem, recipient, Severity.INFO, expiresAt));
