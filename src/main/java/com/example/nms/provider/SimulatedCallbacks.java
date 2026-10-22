@@ -2,7 +2,9 @@ package com.example.nms.provider;
 
 import com.example.nms.common.CallbackEvent;
 import com.example.nms.observability.RedactedThrowable;
+import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -53,12 +55,13 @@ public class SimulatedCallbacks implements DisposableBean {
   SimulatedCallbacks(SimulatedCallbackProperties properties, Clock clock) {
     this.properties = properties;
     this.clock = clock;
-    this.baseUrl = blankToNull(properties.baseUrl());
     if (!properties.enabled()) {
+      this.baseUrl = null;
       this.executor = null;
       this.http = null;
       return;
     }
+    this.baseUrl = validBaseUrl(properties.baseUrl());
     for (String provider : List.of(SimulatedEmailProvider.NAME, SimulatedSmsProvider.NAME)) {
       if (blankToNull(properties.tokens().get(provider)) == null) {
         throw new IllegalStateException("nms.simulator.callbacks.tokens: no token for " + provider);
@@ -104,6 +107,31 @@ public class SimulatedCallbacks implements DisposableBean {
         TimeUnit.MILLISECONDS);
   }
 
+  /** {@code null} if blank (this server); otherwise an absolute http(s) URL, else startup fails. */
+  static String validBaseUrl(String configured) {
+    String value = blankToNull(configured);
+    if (value == null) {
+      return null;
+    }
+    URI uri;
+    try {
+      uri = new URI(value);
+    } catch (URISyntaxException e) {
+      throw invalidBaseUrl();
+    }
+    String scheme = uri.getScheme();
+    if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
+        || uri.getHost() == null) {
+      throw invalidBaseUrl();
+    }
+    return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
+  }
+
+  private static IllegalStateException invalidBaseUrl() {
+    return new IllegalStateException(
+        "nms.simulator.callbacks.base-url must be an absolute http or https URL, or blank");
+  }
+
   /** Callbacks scheduled so far; a deduped resend does not count. */
   public int scheduledCallbacks() {
     return scheduled.get();
@@ -115,27 +143,21 @@ public class SimulatedCallbacks implements DisposableBean {
       String providerMessageId,
       CallbackEvent event,
       String reasonCode) {
-    String target = baseUrl;
-    if (target == null) {
-      log.warn("Simulated callback for delivery {} dropped: no server port yet", deliveryId);
-      return;
-    }
-    Map<String, Object> body = new LinkedHashMap<>();
-    body.put("deliveryId", deliveryId.toString());
-    body.put("providerMessageId", providerMessageId);
-    body.put("event", event.name());
-    if (reasonCode != null) {
-      body.put("reasonCode", reasonCode);
-    }
-    body.put("occurredAt", clock.instant().toString());
-    HttpRequest request =
-        HttpRequest.newBuilder(URI.create(target + WEBHOOKS_PATH + provider))
-            .timeout(HTTP_TIMEOUT)
-            .header("Content-Type", "application/json")
-            .header(TOKEN_HEADER, properties.tokens().get(provider))
-            .POST(HttpRequest.BodyPublishers.ofString(JsonMapper.shared().writeValueAsString(body)))
-            .build();
     try {
+      String target = baseUrl;
+      if (target == null) {
+        log.warn("Simulated callback for delivery {} dropped: no server port yet", deliveryId);
+        return;
+      }
+      HttpRequest request =
+          HttpRequest.newBuilder(URI.create(target + WEBHOOKS_PATH + provider))
+              .timeout(HTTP_TIMEOUT)
+              .header("Content-Type", "application/json")
+              .header(TOKEN_HEADER, properties.tokens().get(provider))
+              .POST(
+                  HttpRequest.BodyPublishers.ofString(
+                      body(deliveryId, providerMessageId, event, reasonCode)))
+              .build();
       int status = http.send(request, HttpResponse.BodyHandlers.discarding()).statusCode();
       if (status == 200) {
         log.debug("Simulated callback {} for delivery {} posted", event, deliveryId);
@@ -144,13 +166,27 @@ public class SimulatedCallbacks implements DisposableBean {
       }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
-    } catch (Exception e) {
+    } catch (IOException | RuntimeException e) {
+      // Anything escaping a scheduled task would be swallowed silently by the executor.
       log.warn(
           "Simulated callback {} for delivery {} failed",
           event,
           deliveryId,
           RedactedThrowable.of(e));
     }
+  }
+
+  private String body(
+      UUID deliveryId, String providerMessageId, CallbackEvent event, String reasonCode) {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("deliveryId", deliveryId.toString());
+    body.put("providerMessageId", providerMessageId);
+    body.put("event", event.name());
+    if (reasonCode != null) {
+      body.put("reasonCode", reasonCode);
+    }
+    body.put("occurredAt", clock.instant().toString());
+    return JsonMapper.shared().writeValueAsString(body);
   }
 
   @Override
