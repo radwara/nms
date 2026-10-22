@@ -145,6 +145,7 @@ Demo (`scripts/demo.sh`, dev-profile jar on port 18080, fresh database): `Demo p
 
 - Issue: #47. Requirements: SC-2, NFR scalability. Revisits ADR-0004 (broker named as the production path).
 - Baseline: `main` at `950dcfd` (#46 merged), treated as the existing system.
+- Status: implemented on `feat/47-kafka-email`; Execution and Validation below.
 
 ## 1. Context and gap
 
@@ -217,3 +218,40 @@ None. Kafka is off by default and `poll()` runs the same queries when off. `Deli
 - EMAIL first dispatch that is not due at publish time (scheduled send) or deferred by the rate limit goes out up to one grace window after it becomes due (poller).
 - Publish runs on the request thread after commit; with the broker down a submission waits up to `max.block.ms` (1s) once before its sends fail.
 - One topic, no ordering guarantee needed (each message is independent; the claim arbitrates).
+
+## Execution (#47)
+
+Branch `feat/47-kafka-email` from `950dcfd`.
+
+| # | Commit | Content |
+|---|---|---|
+| 1 | `2594582` docs(delivery): Kafka fast path impact analysis | This section, before any code |
+| 2 | `64889ef` refactor(delivery): dispatch seam, queued event, process by id | `DeliveriesQueued` published by `ChannelRouter` (no listener); `DeliveryWorker.process(UUID)` sharing the poll's per-row path. `./mvnw -B verify` green: 343 unit, 287 IT |
+| 3 | `01ad592` feat(delivery): Kafka fast path for EMAIL first dispatch | Starter + test starter, `KafkaDispatch*`, publisher, listener, grace query, `nms.kafka.published`, tests |
+| 4 | docs | ADR-0008, ADR-0004 status, `architecture.md`, README, `requirements.md`, this section |
+
+Zero test changes in the refactor commit:
+
+```
+$ git diff --stat 2594582..64889ef -- src/test
+(empty)
+```
+
+Greenfield tests changed: none. Dependency note: `spring-boot-starter-kafka-test` excludes `log4j-core` (it brings an annotation processor that fails `-Werror`; the embedded broker logs through SLF4J).
+
+## Validation (#47)
+
+| Test | Covers |
+|---|---|
+| `DeliveryWorkerFastPathTest` | Grace on: `PENDING` queries get EMAIL and `now - grace`, `RETRY_SCHEDULED` and lease reclaim get `now`; grace off: only `findDue`; cutoff arithmetic; grace must be positive; `process` sends a due `PENDING` row through the claim, skips `SENT`, `RETRY_SCHEDULED`, not-yet-due, missing rows and a stopping worker without a claim, no send on a lost claim |
+| `EmailDispatchPublisherTest` | EMAIL ids only, key = value = id; a send failing at once stops the rest (all counted failed); a throw is swallowed; a later failure counted on completion |
+| `DeliveryGraceQueryIT` | In-grace EMAIL left out; SMS and past-grace EMAIL returned earliest first; in-grace rows do not use up the limit |
+| `KafkaEmailDispatchIT` (embedded KRaft broker, poller on, grace 60s) | Intake -> Kafka -> consumer -> `SENT` well inside the grace, `published{ok}` +1; same id published twice: one attempt, one `SENT` audit; SMS sent by the poller, nothing published |
+| `KafkaPublishFailureIT` (no broker, grace 2s, consumer not started) | Submission accepted; `published{failed}` +2 (two recipients); the poller sends both, not before created + grace |
+| `KafkaDisabledIT` | Default config: no dispatch beans, no listener containers, no grace |
+
+Mutation checks (not committed): consumer `process` doing nothing fails the fast-path and duplicate tests; poller ignoring the grace fails `KafkaPublishFailureIT` (and the unit and query tests).
+
+`./mvnw -B verify`: 359 unit, 294 integration, 0 failures. No Kafka connection attempt in the log of the full run (Kafka off everywhere except the two Kafka ITs). Kafka ITs run 4 times (full verify + 3 reruns): all green.
+
+Demo (`scripts/demo.sh`, dev-profile jar on port 18080, fresh database, Kafka off): `Demo passed: 9 steps`.

@@ -1,6 +1,6 @@
 # ADR-0004: Database-backed delivery queue with a polling worker
 
-- Status: Accepted (2026-10-20)
+- Status: Accepted (2026-10-20); partially superseded by ADR-0008 (Kafka fast path for EMAIL first dispatch, off by default)
 - Related: SC-1, FR-4.2, NFR-2, NFR-4
 
 ## Context
