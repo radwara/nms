@@ -31,7 +31,7 @@ flowchart LR
 | API + auth | REST endpoints, validation, API-key and webhook-token auth, error mapping |
 | Intake | Idempotency check, split request into one notification per recipient, event dedup (ADR-0006), persist |
 | Routing | Resolve channels per recipient from request, preferences, and policy |
-| Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire |
+| Delivery worker | Claim due deliveries, call provider, classify result, schedule retries, expire; outbound rate limit per source system and channel (ADR-0007) |
 | Provider adapters | One per channel: send call and error classification only. Callbacks are parsed in `api.CallbackRequestValidator` (one generic format) and mapped event -> status in `delivery.DeliveryCallbacks`. Production path: a per-provider `CallbackParser` chosen by `WebhookProvider` (not built) |
 | Webhook handler | Authenticate (token filter) and validate the callback, hand it to `DeliveryCallbacks` in `delivery`, which dedupes by state and applies the final status |
 | Status + audit | Read models; overall status derived on read |
@@ -510,6 +510,8 @@ sequenceDiagram
         W->>D: load the batch's notifications and recipients (findAllById)
         alt past expiresAt
             W->>D: EXPIRED + audit, no send
+        else over the rate limit (source system, channel)
+            W->>D: first denial of the key in this poll: one update moves all its due rows to the window end, version + 1; no claim, no audit; the key is skipped for the rest of the batch
         else
             W->>D: claim (committed): SENDING, claimed_at = now, attempt + 1, version + 1 where id, status, and version match
             W->>P: send outside any transaction (idempotency key = deliveryId)
@@ -532,6 +534,7 @@ sequenceDiagram
 - The poll runs one query per due status and priority (`status = :s and priority = :p and next_attempt_at <= :now order by next_attempt_at limit :n`, 6 range scans) plus the lease-reclaim query, and merges in Java by priority, then due time. A `status in (...)` query cannot use the index for the order (measured on H2: 10 rows read vs 4001). One query per status ordered by priority is not enough either: it walks every not-yet-due row of a better priority first (H2, 2,000 future `HIGH` rows ahead of 5 due `LOW`: 2,006 rows read vs 6 per priority).
 - When a poll sees a full batch due, the poller polls again at once, for up to one poll interval, so a backlog drains at send speed instead of one batch per interval.
 - Rows are worked one at a time: claim, send, outcome.
+- Rate limit (ADR-0007): after every pre-send check and just before the claim, each attempt (retries and lease reclaims included, CRITICAL too) takes one unit of a fixed window per (source system, channel). On the first denial of a key in a poll, one set-based update moves every due row of that key (`PENDING` / `RETRY_SCHEDULED` due, `SENDING` past the lease) to the window end and bumps `version`, so other sources go out on the next poll; the key is skipped for the rest of the batch. Status and attempts unchanged, no audit, DEBUG log, `nms.delivery.deferred` per row. A unit whose claim is lost or throws is released. The limiter is safe for concurrent callers (#47). Poll order breaks `next_attempt_at` ties by `created_at` (FIFO within a source). A row deferred past `expiresAt` expires on its next poll (existing path). The vendor's own quota stays reactive (429, A-41).
 - A row that cannot be sent fails without a claim (conditional on the polled status and version), with an ERROR log by id and a `FAILED` audit: `NO_PROVIDER_ADAPTER`, `NO_ADDRESS`, `MISSING_RECIPIENT`, `MISSING_NOTIFICATION` (no audit: no source system). Any other error before the claim pushes `next_attempt_at` forward (backoff, at least 1s), so a poison row cannot keep sorting first and stall the queue.
 - A provider that throws counts as a `TRANSIENT` failure (code `exception`) and goes through the retry policy. An error after the claim (outcome write) leaves the row `SENDING`; it is reclaimed after the lease.
 - Shutdown: the worker stops between deliveries when the context closes or the thread is interrupted; the poller's scheduler waits `send-timeout` + 5s for the delivery in progress.
@@ -552,7 +555,15 @@ nms:
     send-timeout: 10s      # adapter contract: send returns within this (TIMEOUT otherwise)
     max-attempts: 3        # including the first (A-40)
     backoff-base: 500ms    # retry n waits cap/2 + random(0, cap/2), cap = base * 2^(n-1); a failure with Retry-After waits for it (max 60s)
+  rate-limit:              # ADR-0007; all positive, read at startup
+    window: 1m             # fixed windows aligned to multiples of it
+    per-source:            # sends per source system, channel, window
+      EMAIL: 600
+      SMS: 60
+    default-per-source: 30 # any channel not listed
 ```
+
+Rate limit limitations: counts are per instance and reset on restart (N instances allow N x limit); up to 2 x limit in a burst across a window boundary; a key's deferred backlog becomes due together at each window end and is re-swept by one update per window (spreading it over future windows is a follow-up). On PostgreSQL the `created_at` tiebreak needs `created_at` in `ix_delivery_poll` to keep the index-ordered scan (not done; H2 reads the same rows either way).
 
 Startup fails if a provider in `nms.routing.providers` has no adapter bean, or one for another channel.
 
@@ -620,12 +631,13 @@ nms:
 | Trace id | Generated per request (or taken from `traceparent`), in MDC, logs, `X-Trace-Id` response header, and error bodies |
 | Logs | Structured JSON (Spring Boot `logging.structured.format.console`); ids and outcome categories only |
 | Health | `/actuator/health`: Spring Boot defaults (`db`, `diskSpace`, `ping`); the worker is not part of health |
-| Metrics | `nms.dedup.lookup` timer per dedup query; `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
+| Metrics | `nms.dedup.lookup` timer per dedup query; `nms.notifications.submitted{outcome}` per notification of a committed new submission (`outcome` = `accepted` or `suppressed`; replays and rollbacks are not counted; no `type` / `eventId` tags, they are unbounded); `nms.delivery.attempts{channel,category}` per send call (`category` = error category or `ACCEPTED`); `nms.deliveries.outcome{channel,status}` when a delivery reaches `SENT`, `DELIVERED`, `FAILED`, or `EXPIRED` (callbacks count `DELIVERED` / `FAILED`; ignored and unknown callbacks are not counted; a delivery whose callback beat the worker's `SENT` write is never counted as `SENT`, so `SENT` can be lower than the deliveries accepted); `nms.delivery.deferred{channel,reason}` per due delivery moved without a claim (a set-based postpone adds the rows it moved) (`reason` = `rate_limited`; no source system tag, the DEBUG log has it); `nms.deliveries.due` gauge = due rows seen by the last poll (at most batch-size per query, so it saturates at 7 x batch-size), set by the poller with no query per scrape; `nms.worker.poll` timer per poll |
 
 What to alert on:
 - `AUTH_ERROR` from a provider: our credentials are wrong; every delivery on that channel will fail.
 - Growing `nms.deliveries.due`: workers are not keeping up or a provider is down.
 - `nms.deliveries.due` above 0 with no increase in `nms.delivery.attempts`: the poller has stopped (the gauge keeps its last value).
+- Sustained `nms.delivery.deferred{reason="rate_limited"}`: a source is above its limit (find it in the worker's DEBUG log); raise `nms.rate-limit.per-source.<CHANNEL>` (restart) only if the volume is legitimate.
 - Rising `http_server_requests{status="401"}` on `/api/v1/webhooks/*`: misconfigured or forged callbacks (failed-auth logs are DEBUG).
 - Suppression ratio `nms.notifications.submitted{outcome="suppressed"} / sum(nms.notifications.submitted)` above its baseline (e.g. 20% over 15 min): a source in a resend loop, or dedup suppressing more than expected. Check the `SUPPRESSED` audit events (`duplicate of <id>`) of that source; if dedup is wrong, set `NMS_DEDUP_ENABLED=false` (no data change, takes effect on restart). A rising `nms.dedup.lookup` p99 means the lookup is reading more rows than it should (check the index plan). The after-commit log line `Submission <id> accepted: <n> notifications, <m> suppressed, for source system <s>` gives the per-submission split.
 
@@ -636,7 +648,7 @@ What to alert on:
 | Database | H2 | PostgreSQL; set `reWriteBatchedInserts=true` on the JDBC URL so Hibernate's insert batches become multi-row inserts |
 | Work claiming | Conditional update on `id`, `status`, and `version` | `SELECT ... FOR UPDATE SKIP LOCKED`, or a broker (Kafka/SQS) with the database as outbox |
 | Throughput | One instance, single-threaded poller | Horizontal instances; per-channel worker pools |
-| Provider limits | Retry on 429 | Token bucket per provider |
+| Provider limits | Retry on 429; in-memory fixed window per source system and channel (ADR-0007) | Shared counter (Redis or a database row per key and window) across instances; token bucket per provider |
 | Auth | Hashed API keys in config | HMAC request signing or JWT; secrets manager |
 | Retention | None; expired idempotency rows are replaced on reuse | Idempotency purge job, partitioned audit tables, archival |
 | Lock waits | H2 `LOCK_TIMEOUT` (default 2 s) triggers 409/4092 for a racing retry | Set PostgreSQL `lock_timeout` (it waits forever by default) so the 4092 path engages |
