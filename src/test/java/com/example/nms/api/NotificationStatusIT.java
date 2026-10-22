@@ -169,16 +169,18 @@ class NotificationStatusIT {
               + (e.has("channel") ? " " + e.get("channel").stringValue() : "")
               + (e.has("detail") ? " " + e.get("detail").stringValue() : ""));
     }
-    assertThat(lines)
+    assertThat(lines.subList(0, 6))
         .containsExactly(
             "ACCEPTED",
             "ROUTED EMAIL PREFERENCE",
             "ROUTED SMS PREFERENCE",
             "QUEUED EMAIL",
             "QUEUED SMS",
-            "DUPLICATE_SUBMISSION same Idempotency-Key; original returned",
-            "SENT EMAIL",
-            "SENT SMS",
+            "DUPLICATE_SUBMISSION same Idempotency-Key; original returned");
+    // Equal priority and due time: the worker's send order between the two is not defined.
+    assertThat(lines.subList(6, 8)).containsExactlyInAnyOrder("SENT EMAIL", "SENT SMS");
+    assertThat(lines.subList(8, lines.size()))
+        .containsExactly(
             "FAILED EMAIL BOUNCED, code MAILBOX_UNAVAILABLE",
             "CALLBACK_IGNORED EMAIL already FAILED; event DELIVERED");
     // The submit transaction's events share one timestamp; the id keeps their insert order.
