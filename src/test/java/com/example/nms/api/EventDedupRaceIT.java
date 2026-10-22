@@ -5,6 +5,7 @@ import static com.example.nms.support.SubmitRequests.newKey;
 import static com.example.nms.support.SubmitRequests.valid;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.example.nms.support.DelegatingRoutingGate;
 import com.example.nms.support.RoutingGate;
 import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
@@ -19,16 +20,17 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * #14, ADR-0006: pins the documented race. Two submissions of the same event and message under
- * different keys that overlap in time are both accepted (fail open: greenfield behaviour). If a
- * later change serializes them, this test shows it.
+ * #14, ADR-0006: pins the documented race on a real server with real routing. Two submissions of
+ * the same event and message under different keys that overlap in time are both accepted (fails
+ * open: one extra message). Once the first has committed, a third is suppressed. If a later change
+ * serializes them, this test shows it.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import(RoutingGate.Configuration.class)
+@Import(DelegatingRoutingGate.Configuration.class)
 class EventDedupRaceIT {
 
   @LocalServerPort private int port;
-  @Autowired private RoutingGate gate;
+  @Autowired private DelegatingRoutingGate gate;
   @Autowired private JdbcTemplate jdbc;
 
   private final HttpClient http = HttpClient.newHttpClient();
@@ -49,14 +51,19 @@ class EventDedupRaceIT {
         RoutingGate.submit(http, port, newKey(), body).get(10, TimeUnit.SECONDS);
     gate.release();
     HttpResponse<String> held = first.get(10, TimeUnit.SECONDS);
+    HttpResponse<String> third =
+        RoutingGate.submit(http, port, newKey(), body).get(10, TimeUnit.SECONDS);
 
     assertThat(second.statusCode()).isEqualTo(202);
     assertThat(held.statusCode()).isEqualTo(202);
     assertThat(second.body()).contains("\"ACCEPTED\"").doesNotContain("SUPPRESSED");
     assertThat(held.body()).contains("\"ACCEPTED\"").doesNotContain("SUPPRESSED");
+    assertThat(third.statusCode()).isEqualTo(202);
+    assertThat(third.body()).contains("\"SUPPRESSED\"");
     assertThat(
             jdbc.queryForObject(
-                "select count(*) from notification where duplicate_of is null", Integer.class))
+                "select count(*) from notification where duplicate_of is null and routed",
+                Integer.class))
         .isEqualTo(2);
   }
 }

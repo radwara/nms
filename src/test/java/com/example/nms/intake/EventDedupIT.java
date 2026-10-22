@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.example.nms.common.Channel;
 import com.example.nms.common.Priority;
 import com.example.nms.common.Severity;
+import com.example.nms.delivery.DeliveryWorker;
 import com.example.nms.intake.SubmittedNotification.Outcome;
 import com.example.nms.support.MutableClock;
 import java.time.Duration;
@@ -46,6 +47,7 @@ class EventDedupIT {
   @Autowired private JdbcTemplate jdbc;
   @Autowired private MutableClock clock;
   @Autowired private NotificationRepository notifications;
+  @Autowired private DeliveryWorker worker;
 
   private String event;
 
@@ -146,15 +148,56 @@ class EventDedupIT {
   }
 
   @Test
-  void notRoutedOriginalStillAnchorsAndChannelsAreNotPartOfTheKey() {
-    // No phone: requested SMS only leaves no usable channel.
+  void notRoutedOriginalDoesNotAnchor() {
+    // No phone: requested SMS only leaves no usable channel, so nothing was ever sent.
     SubmitCommand smsOnly = withChannels(command("user-email-only"), List.of(Channel.SMS));
-    SubmittedNotification original = single(intake.submit(smsOnly));
-    assertThat(deliveries(original.notificationId())).isZero();
+    SubmittedNotification notRouted = single(intake.submit(smsOnly));
+    assertThat(deliveries(notRouted.notificationId())).isZero();
+    assertThat(routed(notRouted.notificationId())).isFalse();
 
-    SubmittedNotification repeat = single(intake.submit(command("user-email-only")));
+    // Resent with a usable channel (e.g. after the request or directory is fixed): delivered.
+    SubmittedNotification resend = single(intake.submit(command("user-email-only")));
+    assertThat(resend.outcome()).isEqualTo(Outcome.ACCEPTED);
+    assertThat(deliveries(resend.notificationId())).isOne();
+    assertThat(routed(resend.notificationId())).isTrue();
+
+    // The routed resend anchors the next repeat.
+    assertThat(single(intake.submit(command("user-email-only"))).duplicateOf())
+        .isEqualTo(resend.notificationId());
+  }
+
+  @Test
+  void channelsAreNotPartOfTheKey() {
+    SubmittedNotification original =
+        single(intake.submit(withChannels(command("user-ok"), List.of(Channel.EMAIL))));
+
+    SubmittedNotification repeat = single(intake.submit(command("user-ok")));
 
     assertThat(repeat.duplicateOf()).isEqualTo(original.notificationId());
+  }
+
+  @Test
+  void failedOriginalStillAnchors() {
+    // Both channels are rejected permanently by the simulated vendors.
+    SubmittedNotification original = single(intake.submit(command("user-reject")));
+    worker.runOnce();
+    assertThat(deliveryStatuses(original.notificationId())).containsOnly("FAILED");
+
+    assertThat(single(intake.submit(command("user-reject"))).duplicateOf())
+        .isEqualTo(original.notificationId());
+  }
+
+  @Test
+  void expiredOriginalStillAnchors() {
+    SubmittedNotification original =
+        single(intake.submit(withExpiresAt(command("user-ok"), now().plus(Duration.ofMinutes(1)))));
+    clock.advance(Duration.ofMinutes(2));
+    worker.runOnce();
+    assertThat(deliveryStatuses(original.notificationId())).containsOnly("EXPIRED");
+
+    // expiresAt is not part of the message.
+    SubmitCommand resend = withExpiresAt(command("user-ok"), now().plus(Duration.ofHours(1)));
+    assertThat(single(intake.submit(resend)).duplicateOf()).isEqualTo(original.notificationId());
   }
 
   @Test
@@ -347,6 +390,21 @@ class EventDedupIT {
         c.expiresAt());
   }
 
+  private static SubmitCommand withExpiresAt(SubmitCommand c, Instant expiresAt) {
+    return new SubmitCommand(
+        c.sourceSystem(),
+        c.idempotencyKey(),
+        c.eventId(),
+        c.type(),
+        c.severity(),
+        c.priority(),
+        c.recipients(),
+        c.subject(),
+        c.body(),
+        c.scheduledAt(),
+        expiresAt);
+  }
+
   private static SubmitCommand withChannels(SubmitCommand c, List<Channel> channels) {
     return new SubmitCommand(
         c.sourceSystem(),
@@ -382,6 +440,16 @@ class EventDedupIT {
   private int deliveries(UUID notificationId) {
     return jdbc.queryForObject(
         "select count(*) from delivery where notification_id = ?", Integer.class, notificationId);
+  }
+
+  private boolean routed(UUID notificationId) {
+    return jdbc.queryForObject(
+        "select routed from notification where id = ?", Boolean.class, notificationId);
+  }
+
+  private List<String> deliveryStatuses(UUID notificationId) {
+    return jdbc.queryForList(
+        "select status from delivery where notification_id = ?", String.class, notificationId);
   }
 
   /** {@code "TYPE detail"} per event, in history order. */

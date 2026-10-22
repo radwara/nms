@@ -3,6 +3,7 @@ package com.example.nms.intake;
 import com.example.nms.common.Channel;
 import com.example.nms.common.Priority;
 import com.example.nms.common.Severity;
+import jakarta.persistence.Column;
 import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
@@ -13,6 +14,7 @@ import jakarta.persistence.PostPersist;
 import jakarta.persistence.Transient;
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
@@ -65,10 +67,22 @@ public class Notification implements Persistable<UUID> {
   /** The original this notification repeats (suppressed at intake, no deliveries); else null. */
   private UUID duplicateOf;
 
+  /**
+   * Routing created at least one delivery for it, in the submit transaction (ADR-0006). Not
+   * updatable through the entity (a row update would rewrite the content); intake persists it with
+   * one bulk update per submission ({@link NotificationRepository#markRouted}).
+   */
+  @Column(updatable = false)
+  private boolean routed;
+
   @Transient private boolean isNew = true;
 
   protected Notification() {}
 
+  /**
+   * A row without the dedup fields (no content hash), shaped like one written before V3: it never
+   * anchors event dedup. Kept for existing tests and tooling; intake uses the other constructor.
+   */
   public Notification(
       UUID id,
       UUID submissionId,
@@ -100,7 +114,10 @@ public class Notification implements Persistable<UUID> {
     this.createdAt = createdAt;
   }
 
-  /** As the other constructor, plus the dedup fields; {@code duplicateOf} null for an original. */
+  /**
+   * A new row with the dedup fields: {@code contentHash} is required; {@code duplicateOf} is null
+   * for an original.
+   */
   public Notification(
       UUID id,
       UUID submissionId,
@@ -133,7 +150,7 @@ public class Notification implements Persistable<UUID> {
         scheduledAt,
         expiresAt,
         createdAt);
-    this.contentHash = contentHash;
+    this.contentHash = Objects.requireNonNull(contentHash, "contentHash");
     this.duplicateOf = duplicateOf;
   }
 
@@ -200,6 +217,21 @@ public class Notification implements Persistable<UUID> {
 
   public UUID getDuplicateOf() {
     return duplicateOf;
+  }
+
+  public boolean isRouted() {
+    return routed;
+  }
+
+  /**
+   * Called by routing when it creates a delivery for this notification, inside the submit
+   * transaction. Only routed originals anchor event dedup.
+   */
+  public void markRouted() {
+    if (isSuppressed()) {
+      throw new IllegalStateException("Suppressed notification " + id + " cannot be routed");
+    }
+    this.routed = true;
   }
 
   /** Suppressed at intake as a repeat of {@link #getDuplicateOf()}: it has no deliveries. */

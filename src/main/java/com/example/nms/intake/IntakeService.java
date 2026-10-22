@@ -186,6 +186,12 @@ public class IntakeService {
               audit.duplicateEvent(command.sourceSystem(), n.getDuplicateOf(), n.getId(), now);
             });
     routing.route(originals, now);
+    // Only routed originals anchor event dedup (ADR-0006); one bulk update, not a row update each.
+    List<UUID> routed =
+        originals.stream().filter(Notification::isRouted).map(Notification::getId).toList();
+    if (!routed.isEmpty()) {
+      notifications.markRouted(routed);
+    }
     int suppressed = created.size() - originals.size();
     afterCommit(
         () -> {

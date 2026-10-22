@@ -15,6 +15,8 @@ spring:
           time_zone: UTC
           batch_size: 50
         order_inserts: true
+        # Pads IN lists to a power of two, so 1..100 recipients share a few cached statement plans.
+        query.in_clause_parameter_padding: true
         # Flyway owns the schema; do not let Hibernate create helper tables at startup.
         query.mutation_strategy.global_temporary.create_tables: false
   h2:
@@ -45,6 +47,7 @@ nms:
     # within the window, is suppressed. false = greenfield behaviour (no lookup, nothing suppressed).
     enabled: ${NMS_DEDUP_ENABLED:true}
     # Measured from the original's submission; must be positive. Independent of idempotency retention.
+    # Both settings are read at startup: a change takes effect on restart.
     window: ${NMS_DEDUP_WINDOW:24h}
   routing:
     # Channels added per severity (A-26). An opt-out or a missing address withholds them (A-30).

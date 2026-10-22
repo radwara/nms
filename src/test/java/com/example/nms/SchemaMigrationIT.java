@@ -31,7 +31,7 @@ class SchemaMigrationIT {
         .contains("1", "2");
   }
 
-  /** #14: V3 adds the dedup columns and the index that serves the dedup lookup. */
+  /** #14: V3 adds the dedup columns, the routed flag, and the index that serves the lookup. */
   @Test
   void eventDedupMigrationAddsColumnsAndIndex() {
     assertThat(Arrays.stream(flyway.info().applied()).map(m -> m.getVersion().getVersion()))
@@ -44,12 +44,24 @@ class SchemaMigrationIT {
                 String.class))
         .containsExactlyInAnyOrder("duplicate_of", "content_hash");
     assertThat(
+            jdbc.queryForObject(
+                "select is_nullable || ' ' || column_default from information_schema.columns"
+                    + " where table_name = 'notification' and column_name = 'routed'",
+                String.class))
+        .isEqualToIgnoringCase("NO FALSE");
+    assertThat(
             jdbc.queryForList(
                 "select column_name from information_schema.index_columns"
                     + " where index_name = 'ix_notification_event_dedup' order by ordinal_position",
                 String.class))
         .containsExactly(
-            "source_system", "event_id", "type", "recipient_id", "content_hash", "created_at");
+            "source_system",
+            "event_id",
+            "type",
+            "content_hash",
+            "duplicate_of",
+            "routed",
+            "created_at");
   }
 
   @Test
