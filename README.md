@@ -270,9 +270,14 @@ Summary across PRs; each PR's AI-usage note and review record has the details.
 
 ## How this was built
 
-<!-- ENGINEER: working mode, in your words -->
+Engineer-led, AI-accelerated. I set the scope and acceptance criteria and made the design decisions:
+- the retry policy: 3 attempts, jitter, `expiresAt` as the only deadline
+- the dedup key: event id + content hash. A never-sent original doesn't block a resend once the address is fixed
+- CRITICAL overrides channel opt-out
+- the rate limit: per source and channel, no CRITICAL bypass, generous defaults
+- Kafka as a fast path for EMAIL, with the poller as reconciliation, instead of a full outbox
 
-Time spent: <!-- ENGINEER: time spent (focused hours) -->
+Time spent: about 8 focused hours across several sessions. Commit and PR timestamps include breaks.
 
 Tools: Claude Code (Claude Opus) for orchestration, implementation and reviews; GitHub Actions for CI.
 
