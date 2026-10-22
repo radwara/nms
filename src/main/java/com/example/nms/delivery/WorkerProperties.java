@@ -15,7 +15,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param sendTimeout the longest a provider adapter may take to return from a send (the adapter
  *     contract); also bounds how long shutdown waits for an in-flight poll
  * @param maxAttempts send attempts per delivery, including the first
- * @param backoffBase upper bound of the first retry delay; doubles per attempt (full jitter)
+ * @param backoffBase upper bound of the first retry delay; doubles per attempt; each delay is at
+ *     least half its bound (equal jitter)
  */
 @ConfigurationProperties("nms.worker")
 record WorkerProperties(
@@ -24,8 +25,8 @@ record WorkerProperties(
     @DefaultValue("20") int batchSize,
     @DefaultValue("30s") Duration lease,
     @DefaultValue("10s") Duration sendTimeout,
-    @DefaultValue("4") int maxAttempts,
-    @DefaultValue("2s") Duration backoffBase) {
+    @DefaultValue("3") int maxAttempts,
+    @DefaultValue("500ms") Duration backoffBase) {
 
   WorkerProperties {
     require(!pollInterval.isNegative() && !pollInterval.isZero(), "poll-interval must be > 0");

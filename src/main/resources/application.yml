@@ -58,9 +58,9 @@ nms:
     # Adapter contract: a send returns within this (TIMEOUT otherwise). Must be shorter than lease.
     send-timeout: 10s
     # Send attempts per delivery, including the first (A-40).
-    max-attempts: 4
-    # First retry waits random(0, base); the bound doubles per attempt.
-    backoff-base: 2s
+    max-attempts: 3
+    # Retry n waits base * 2^(n-1) / 2 plus random up to the same again (equal jitter).
+    backoff-base: 500ms
   security:
     # keyId:sourceSystem:sha256hex[,...] (ADR-0001). Empty: every /api request is rejected with 401.
     api-keys: ${NMS_API_KEYS:}

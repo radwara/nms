@@ -58,8 +58,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 /**
  * #10: the worker against the seeded directory and the simulated providers. Time is a {@link
- * MutableClock}; jitter always returns its bound, so backoff is exactly {@code 2s, 4s, 8s}. The
- * poller is off; each test calls {@link DeliveryWorker#runOnce()}.
+ * MutableClock}; jitter always returns its bound, so backoff (3 attempts, base 500ms) is exactly
+ * {@code 0.5s, 1s}. The poller is off; each test calls {@link DeliveryWorker#runOnce()}.
  */
 @SpringBootTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
 @Import(DeliveryWorkerIT.TestBeans.class)
@@ -151,9 +151,9 @@ class DeliveryWorkerIT {
               3,
               List.of(
                   "ATTEMPT_FAILED attempt 1, TRANSIENT, code 503",
-                  "RETRY_SCHEDULED in 2s",
+                  "RETRY_SCHEDULED in 0.5s",
                   "ATTEMPT_FAILED attempt 2, TRANSIENT, code 503",
-                  "RETRY_SCHEDULED in 4s",
+                  "RETRY_SCHEDULED in 1s",
                   "SENT")));
     }
     return cases.stream();
@@ -220,17 +220,17 @@ class DeliveryWorkerIT {
     Delivery queued = queue("user-transient", Channel.EMAIL, Priority.NORMAL, start, null);
 
     worker.runOnce();
-    assertThat(reload(queued).getNextAttemptAt()).isEqualTo(start.plusSeconds(2));
+    assertThat(reload(queued).getNextAttemptAt()).isEqualTo(start.plusMillis(500));
     assertThat(reload(queued).getStatus()).isEqualTo(DeliveryStatus.RETRY_SCHEDULED);
 
-    clock.advance(Duration.ofSeconds(2).minusNanos(1_000));
+    clock.advance(Duration.ofMillis(500).minusNanos(1_000));
     worker.runOnce();
     assertThat(reload(queued).getAttemptCount()).isOne();
 
     clock.advance(Duration.ofNanos(1_000));
     worker.runOnce();
     assertThat(reload(queued).getAttemptCount()).isEqualTo(2);
-    assertThat(reload(queued).getNextAttemptAt()).isEqualTo(start.plusSeconds(2 + 4));
+    assertThat(reload(queued).getNextAttemptAt()).isEqualTo(start.plusMillis(500 + 1_000));
   }
 
   @Test
@@ -242,7 +242,7 @@ class DeliveryWorkerIT {
     Delivery done = reload(queued);
     assertThat(done.getStatus()).isEqualTo(DeliveryStatus.FAILED);
     assertThat(done.getFailureReason()).isEqualTo("RETRIES_EXHAUSTED");
-    assertThat(done.getAttemptCount()).isEqualTo(4);
+    assertThat(done.getAttemptCount()).isEqualTo(3);
     assertThat(history(queued.getId())).last().isEqualTo("FAILED RETRIES_EXHAUSTED");
   }
 
@@ -303,7 +303,7 @@ class DeliveryWorkerIT {
     assertThat(history(queued.getId()))
         .containsExactly(
             "ATTEMPT_FAILED attempt 1, TRANSIENT, code 503",
-            "RETRY_SCHEDULED in 2s",
+            "RETRY_SCHEDULED in 0.5s",
             "EXPIRED before send");
   }
 
@@ -311,7 +311,7 @@ class DeliveryWorkerIT {
   void nextAttemptPastExpiresAtExpires() {
     Instant start = clock.instant();
     Delivery queued =
-        queue("user-transient", Channel.SMS, Priority.NORMAL, start, start.plusSeconds(2));
+        queue("user-transient", Channel.SMS, Priority.NORMAL, start, start.plusMillis(500));
 
     worker.runOnce();
 
@@ -445,23 +445,22 @@ class DeliveryWorkerIT {
     Delivery done = reload(queued);
     assertThat(done.getStatus()).isEqualTo(DeliveryStatus.FAILED);
     assertThat(done.getFailureReason()).isEqualTo("RETRIES_EXHAUSTED");
-    assertThat(done.getAttemptCount()).isEqualTo(4);
+    assertThat(done.getAttemptCount()).isEqualTo(3);
     assertThat(history(queued.getId()))
         .filteredOn(line -> line.startsWith("ATTEMPT_FAILED"))
         .containsExactly(
             "ATTEMPT_FAILED attempt 1, TRANSIENT, code exception",
             "ATTEMPT_FAILED attempt 2, TRANSIENT, code exception",
-            "ATTEMPT_FAILED attempt 3, TRANSIENT, code exception",
-            "ATTEMPT_FAILED attempt 4, TRANSIENT, code exception");
+            "ATTEMPT_FAILED attempt 3, TRANSIENT, code exception");
   }
 
   @Test
   void reclaimedRowWithNoAttemptsLeftFailsWithoutASend() {
     Instant start = clock.instant();
     Delivery queued = queue("user-ok", Channel.EMAIL, Priority.NORMAL, start, null);
-    // Four attempts started; the last worker died mid-send.
+    // Every attempt (3) started; the last worker died mid-send.
     jdbc.update(
-        "update delivery set status = 'SENDING', attempt_count = 4, claimed_at = ? where id = ?",
+        "update delivery set status = 'SENDING', attempt_count = 3, claimed_at = ? where id = ?",
         Timestamp.from(start),
         queued.getId());
     long sendCalls = email.sendCalls();
@@ -472,7 +471,7 @@ class DeliveryWorkerIT {
     Delivery done = reload(queued);
     assertThat(done.getStatus()).isEqualTo(DeliveryStatus.FAILED);
     assertThat(done.getFailureReason()).isEqualTo("RETRIES_EXHAUSTED");
-    assertThat(done.getAttemptCount()).isEqualTo(4);
+    assertThat(done.getAttemptCount()).isEqualTo(3);
     assertThat(email.sendCalls()).isEqualTo(sendCalls);
     assertThat(history(queued.getId())).containsExactly("FAILED RETRIES_EXHAUSTED");
   }
@@ -658,11 +657,11 @@ class DeliveryWorkerIT {
 
   private static Stream<String> retryLines(ErrorCategory category, String code) {
     List<String> lines = new ArrayList<>();
-    for (int attempt = 1; attempt <= 4; attempt++) {
+    for (int attempt = 1; attempt <= 3; attempt++) {
       lines.add("ATTEMPT_FAILED attempt " + attempt + ", " + category + ", code " + code);
-      if (attempt < 4) {
-        long delay = category == ErrorCategory.RATE_LIMITED ? 5 : 1L << attempt;
-        lines.add("RETRY_SCHEDULED in " + delay + "s");
+      if (attempt < 3) {
+        String delay = category == ErrorCategory.RATE_LIMITED ? "5s" : attempt == 1 ? "0.5s" : "1s";
+        lines.add("RETRY_SCHEDULED in " + delay);
       }
     }
     lines.add("FAILED RETRIES_EXHAUSTED");
@@ -676,7 +675,7 @@ class DeliveryWorkerIT {
         channel,
         DeliveryStatus.FAILED,
         "RETRIES_EXHAUSTED",
-        4,
+        3,
         retryLines(category, code).toList());
   }
 

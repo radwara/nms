@@ -50,7 +50,7 @@ class DeliveryWorkerTest {
           recipients,
           providers,
           outcomes,
-          new RetryPolicy(4, Duration.ofSeconds(2), max -> max),
+          new RetryPolicy(3, Duration.ofMillis(500), max -> max),
           new DeliveryMetrics(new SimpleMeterRegistry()),
           clock,
           new WorkerProperties(
@@ -59,8 +59,8 @@ class DeliveryWorkerTest {
               20,
               Duration.ofSeconds(30),
               Duration.ofSeconds(10),
-              4,
-              Duration.ofSeconds(2)));
+              3,
+              Duration.ofMillis(500)));
 
   private Delivery first;
 
@@ -125,7 +125,7 @@ class DeliveryWorkerTest {
 
     assertThat(worker.runOnce()).isOne();
 
-    verify(deliveries).postpone(first.getId(), DeliveryStatus.PENDING, 0L, NOW.plusSeconds(2), NOW);
+    verify(deliveries).postpone(first.getId(), DeliveryStatus.PENDING, 0L, NOW.plusSeconds(1), NOW);
     verify(provider, times(1)).send(any());
   }
 
