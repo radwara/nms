@@ -30,7 +30,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Accepts a validated submission (ADR-0002): one transaction writes the idempotency record, one
- * notification per recipient, their routing, and {@code ACCEPTED} audits, or nothing.
+ * notification per recipient, their routing, and their audits, or nothing. A recipient whose event
+ * and message repeat within the dedup window is suppressed (ADR-0006).
  *
  * <p>Concurrent requests with one key: the idempotency record is written first, so the loser fails
  * on the unique key (new key) or updates no row (expired key). Its transaction rolls back and a new
@@ -47,7 +48,9 @@ public class IntakeService {
   private final NotificationRepository notifications;
   private final RecipientRepository recipients;
   private final RoutingStep routing;
+  private final EventDedup dedup;
   private final AuditRecorder audit;
+  private final IntakeMetrics metrics;
   private final Clock clock;
   private final Duration retention;
   private final TransactionTemplate transaction;
@@ -57,7 +60,9 @@ public class IntakeService {
       NotificationRepository notifications,
       RecipientRepository recipients,
       RoutingStep routing,
+      EventDedup dedup,
       AuditRecorder audit,
+      IntakeMetrics metrics,
       Clock clock,
       IdempotencyProperties properties,
       PlatformTransactionManager transactionManager) {
@@ -65,7 +70,9 @@ public class IntakeService {
     this.notifications = notifications;
     this.recipients = recipients;
     this.routing = routing;
+    this.dedup = dedup;
     this.audit = audit;
+    this.metrics = metrics;
     this.clock = clock;
     this.retention = properties.retention();
     this.transaction = new TransactionTemplate(transactionManager);
@@ -138,27 +145,64 @@ public class IntakeService {
     if (!violations.isEmpty() || !unknown.isEmpty()) {
       return new Unprocessable(violations, unknown);
     }
+    return create(command, requestHash, existing.isPresent(), now);
+  }
 
+  /**
+   * A new submission: claims the key, then writes one notification per recipient. Originals are
+   * audited {@code ACCEPTED} and routed; event duplicates (ADR-0006) are written suppressed, with
+   * no deliveries, and audited on both rows.
+   */
+  private SubmitResult create(
+      SubmitCommand command, String requestHash, boolean expiredRecordExists, Instant now) {
     UUID submissionId = UUID.randomUUID();
-    claimKey(command, requestHash, existing.isPresent(), submissionId, now);
+    claimKey(command, requestHash, expiredRecordExists, submissionId, now);
+    String contentHash = ContentHash.of(command);
+    Map<String, UUID> duplicates = dedup.duplicates(command, contentHash, now);
     List<Notification> created =
         command.recipients().stream()
-            .map(recipient -> notification(command, recipient, submissionId, now))
+            .map(
+                recipient ->
+                    notification(
+                        command,
+                        recipient,
+                        submissionId,
+                        contentHash,
+                        duplicates.get(recipient.userId()),
+                        now))
             .toList();
     notifications.saveAll(created);
     // Deliveries reference notifications by a plain column (no association Hibernate could order
     // inserts by), so the notifications go to the database before routing adds deliveries.
     notifications.flush();
+    List<Notification> originals = created.stream().filter(n -> !n.isSuppressed()).toList();
     // ACCEPTED first, so each notification's history starts with it and routing events follow.
-    created.forEach(n -> audit.accepted(command.sourceSystem(), n.getId(), now));
-    routing.route(created, now);
+    originals.forEach(n -> audit.accepted(command.sourceSystem(), n.getId(), now));
+    created.stream()
+        .filter(Notification::isSuppressed)
+        .forEach(
+            n -> {
+              audit.suppressed(command.sourceSystem(), n.getId(), n.getDuplicateOf(), now);
+              audit.duplicateEvent(command.sourceSystem(), n.getDuplicateOf(), n.getId(), now);
+            });
+    routing.route(originals, now);
+    // Only routed originals anchor event dedup (ADR-0006); one bulk update, not a row update each.
+    List<UUID> routed =
+        originals.stream().filter(Notification::isRouted).map(Notification::getId).toList();
+    if (!routed.isEmpty()) {
+      notifications.markRouted(routed);
+    }
+    int suppressed = created.size() - originals.size();
     afterCommit(
-        () ->
-            log.info(
-                "Submission {} accepted: {} notifications for source system {}",
-                submissionId,
-                created.size(),
-                command.sourceSystem()));
+        () -> {
+          metrics.submitted(originals.size(), suppressed);
+          log.info(
+              "Submission {} accepted: {} notifications, {} suppressed, for source system {}",
+              submissionId,
+              originals.size(),
+              suppressed,
+              command.sourceSystem());
+        });
     return new Created(view(created));
   }
 
@@ -237,7 +281,12 @@ public class IntakeService {
   }
 
   private static Notification notification(
-      SubmitCommand command, SubmitCommand.Recipient recipient, UUID submissionId, Instant now) {
+      SubmitCommand command,
+      SubmitCommand.Recipient recipient,
+      UUID submissionId,
+      String contentHash,
+      UUID duplicateOf,
+      Instant now) {
     return new Notification(
         UUID.randomUUID(),
         submissionId,
@@ -252,12 +301,14 @@ public class IntakeService {
         command.body(),
         command.scheduledAt(),
         command.expiresAt(),
-        now);
+        now,
+        contentHash,
+        duplicateOf);
   }
 
   private static List<SubmittedNotification> view(List<Notification> notifications) {
     return notifications.stream()
-        .map(n -> new SubmittedNotification(n.getRecipientId(), n.getId()))
+        .map(n -> new SubmittedNotification(n.getRecipientId(), n.getId(), n.getDuplicateOf()))
         .toList();
   }
 

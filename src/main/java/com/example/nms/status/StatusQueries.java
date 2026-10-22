@@ -46,6 +46,7 @@ public class StatusQueries {
               List<Delivery> rows = deliveries.findByNotificationIdOrderByChannel(n.getId());
               OverallStatus overall =
                   OverallStatus.derive(
+                      n.isSuppressed(),
                       n.getScheduledAt(),
                       clock.instant(),
                       rows.stream().map(Delivery::getStatus).toList());
@@ -63,6 +64,7 @@ public class StatusQueries {
                   n.getCreatedAt(),
                   n.getScheduledAt(),
                   n.getExpiresAt(),
+                  n.getDuplicateOf(),
                   rows.stream().map(StatusQueries::state).toList());
             });
   }

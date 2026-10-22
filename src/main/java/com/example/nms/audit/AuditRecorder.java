@@ -53,6 +53,37 @@ public class AuditRecorder {
             at));
   }
 
+  /**
+   * The notification repeats {@code originalId} and was suppressed (ADR-0006); its only submit-time
+   * event. Detail holds the id only.
+   */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void suppressed(String sourceSystem, UUID notificationId, UUID originalId, Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            notificationId,
+            null,
+            AuditEventType.SUPPRESSED,
+            null,
+            "duplicate of " + originalId,
+            at));
+  }
+
+  /** On the original: {@code suppressedId} repeated its event and was suppressed (ADR-0006). */
+  @Transactional(propagation = Propagation.MANDATORY)
+  public void duplicateEvent(String sourceSystem, UUID originalId, UUID suppressedId, Instant at) {
+    events.save(
+        new AuditEvent(
+            sourceSystem,
+            originalId,
+            null,
+            AuditEventType.DUPLICATE_EVENT,
+            null,
+            "suppressed " + suppressedId,
+            at));
+  }
+
   /** A channel selected for a delivery; {@code reason} is the routing reason code. */
   @Transactional(propagation = Propagation.MANDATORY)
   public void routed(

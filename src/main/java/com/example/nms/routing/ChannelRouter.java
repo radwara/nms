@@ -121,6 +121,8 @@ class ChannelRouter implements RoutingStep {
     }
     if (routed.isEmpty()) {
       audit.notRouted(source, notificationId, now);
+    } else {
+      notification.markRouted();
     }
     routed.forEach(d -> audit.queued(source, notificationId, d.getId(), d.getChannel(), now));
     return routed;

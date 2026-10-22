@@ -14,6 +14,7 @@ import java.util.UUID;
  *
  * @param requestedChannels as requested, in request order; null means preferences were used
  * @param duplicateSubmissions number of {@code DUPLICATE_SUBMISSION} audit events (FR-4.3)
+ * @param duplicateOf the original's id when this notification was suppressed (ADR-0006); else null
  */
 public record NotificationStatus(
     UUID notificationId,
@@ -28,6 +29,7 @@ public record NotificationStatus(
     Instant createdAt,
     Instant scheduledAt,
     Instant expiresAt,
+    UUID duplicateOf,
     List<DeliveryState> deliveries) {
 
   /**

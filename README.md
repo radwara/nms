@@ -15,7 +15,7 @@ Requires Java 21. No other installs.
 ./mvnw spring-boot:run   # http://localhost:8080/actuator/health
 ```
 
-Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
+Event dedup is on by default (`NMS_DEDUP_ENABLED`, `NMS_DEDUP_WINDOW`, default `24h`; ADR-0006). Without a profile no API keys are configured (`NMS_API_KEYS` is empty), so every `/api` call returns 401. Use the `dev` profile below to try the API.
 
 ## Run the demo
 
@@ -26,7 +26,7 @@ Needs `curl` and `jq`. The delivery worker is on by default; the `dev` profile a
 scripts/demo.sh                                         # terminal 2; NMS_BASE_URL, NMS_API_KEY, DEMO_TIMEOUT override the defaults
 ```
 
-Eight steps against the HTTP API: health, happy path, routing (requested channel, severity escalation, opt-out), retry, duplicate submission, bounce, a validation error, an authentication error. Steps 2-6 poll status until final (30 s timeout) and each submission uses its own `eventId`; the script exits non-zero on any unexpected result. CI runs it against the built jar. Excerpt:
+Nine steps against the HTTP API: health, happy path, routing (requested channel, severity escalation, opt-out), retry, duplicate submission, event dedup (same event and message under a new key is `SUPPRESSED`; a new message for the same event is delivered), bounce, a validation error, an authentication error. Steps 2-7 poll status until final (30 s timeout); each step uses its own `eventId`, and step 6 reuses it on purpose. The script exits non-zero on any unexpected result. CI runs it against the built jar. Excerpt:
 
 ```
 == 3. Routing: CRITICAL adds SMS; an opt-out withholds it (opt-out wins until #15)
@@ -56,11 +56,27 @@ Eight steps against the HTTP API: health, happy path, routing (requested channel
         EMAIL  DELIVERED  attempts=3
         SMS  DELIVERED  attempts=3
    ...
-== 7. Validation error: submit without Idempotency-Key
+== 6. Event dedup: same event and message under a new key is suppressed; a new message is delivered
+   POST /api/v1/notifications  key=demo-1792643895-24833-dedup-1  -> 202
+        user-ok ACCEPTED 0c4fd20d-...
+   POST /api/v1/notifications  key=demo-1792643895-24833-dedup-2  -> 202
+        user-ok SUPPRESSED a13d0139-...  duplicateOf=0c4fd20d-...
+   POST /api/v1/notifications  key=demo-1792643895-24833-dedup-3  -> 202
+        user-ok ACCEPTED fa914b5d-...
+   GET  /api/v1/notifications/a13d0139-...  -> 200  user-ok  overallStatus=SUPPRESSED  requestedChannels=none  duplicateSubmissions=0  duplicateOf=0c4fd20d-...
+   GET  /api/v1/notifications/a13d0139-.../audit  -> 200
+        SUPPRESSED
+   GET  /api/v1/notifications/0c4fd20d-.../audit  -> 200
+        ACCEPTED ROUTED(EMAIL) ROUTED(SMS) QUEUED(EMAIL) QUEUED(SMS) DUPLICATE_EVENT SENT(EMAIL)
+        SENT(SMS) DELIVERED(EMAIL) DELIVERED(SMS)
+   ...
+   OK
+...
+== 8. Validation error: submit without Idempotency-Key
    POST /api/v1/notifications  (no Idempotency-Key)  -> 400  [{"code":4001,"field":"Idempotency-Key","message":"Required header is missing"}]
    OK
 ...
-Demo passed: 8 steps.
+Demo passed: 9 steps.
 ```
 
 ## Docs

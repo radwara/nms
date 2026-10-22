@@ -19,7 +19,12 @@ public final class RequestHash {
   private RequestHash() {}
 
   public static String of(SubmitCommand command) {
-    byte[] canonical = JsonMapper.shared().writeValueAsBytes(canonical(command));
+    return sha256Hex(canonical(command));
+  }
+
+  /** Lowercase hex SHA-256 of {@code node} written by the shared {@link JsonMapper}. */
+  static String sha256Hex(ObjectNode node) {
+    byte[] canonical = JsonMapper.shared().writeValueAsBytes(node);
     try {
       return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(canonical));
     } catch (NoSuchAlgorithmException e) {

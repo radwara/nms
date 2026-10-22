@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Greenfield demo: drives a running service through its HTTP API and checks every result.
+# Demo: drives a running service through its HTTP API and checks every result.
 # Start the app in the dev profile first (simulated callbacks and demo credentials on); see README "Run the demo".
 #
 #   NMS_BASE_URL   default http://localhost:8080
@@ -77,7 +77,7 @@ submit() {
   request POST "$API_PATH" -H "X-API-Key: $API_KEY" -H "Idempotency-Key: $1" \
     -H "Content-Type: application/json" --data "$2"
   echo "   POST $API_PATH  key=$1  -> $STATUS"
-  jq -r '.notifications[]? | "        \(.recipientId) \(.status) \(.notificationId)"' <<<"$BODY"
+  jq -r '.notifications[]? | "        \(.recipientId) \(.status) \(.notificationId)\(if .duplicateOf then "  duplicateOf=" + .duplicateOf else "" end)"' <<<"$BODY"
 }
 
 # submit_new STEP USER_ID: one recipient, key and eventId named after the step; expects 202;
@@ -101,12 +101,12 @@ await_final() {
     expect_status 200
     overall=$(jq -r '.overallStatus' <<<"$BODY")
     case "$overall" in
-      DELIVERED | PARTIALLY_DELIVERED | FAILED | EXPIRED | NOT_ROUTED) break ;;
+      DELIVERED | PARTIALLY_DELIVERED | FAILED | EXPIRED | NOT_ROUTED | SUPPRESSED) break ;;
     esac
     ((SECONDS < deadline)) || fail "$id still $overall after ${TIMEOUT}s"
     sleep 0.2 # poll interval
   done
-  echo "   GET  $API_PATH/$id  -> $STATUS  $(jq -r '"\(.recipientId)  overallStatus=\(.overallStatus)  requestedChannels=\(.requestedChannels // "none" | tostring)  duplicateSubmissions=\(.duplicateSubmissions)"' <<<"$BODY")"
+  echo "   GET  $API_PATH/$id  -> $STATUS  $(jq -r '"\(.recipientId)  overallStatus=\(.overallStatus)  requestedChannels=\(.requestedChannels // "none" | tostring)  duplicateSubmissions=\(.duplicateSubmissions)\(if .duplicateOf then "  duplicateOf=" + .duplicateOf else "" end)"' <<<"$BODY")"
   jq -r '.deliveries[] | "        \(.channel)  \(.status)  attempts=\(.attempts)\(if .reason then "  reason=" + .reason else "" end)"' <<<"$BODY"
   [[ "$overall" == "$expected" ]] || fail "expected overallStatus $expected, got $overall"
 }
@@ -187,7 +187,33 @@ await_final "$DUP_ID" DELIVERED
 check '.duplicateSubmissions == 1' "expected duplicateSubmissions 1"
 ok
 
-step "6. Bounce: user-bounce, email accepted, then bounced by vendor callback"
+step "6. Event dedup: same event and message under a new key is suppressed; a new message is delivered"
+DEDUP_PAYLOAD=$(payload "$RUN_ID-dedup" "$(recipient user-ok)")
+submit "$RUN_ID-dedup-1" "$DEDUP_PAYLOAD"
+expect_status 202
+check '.notifications[0].status == "ACCEPTED"' "expected the first submission ACCEPTED"
+ORIGINAL_ID=$(id_of user-ok)
+submit "$RUN_ID-dedup-2" "$DEDUP_PAYLOAD"
+expect_status 202
+check ".notifications[0].status == \"SUPPRESSED\" and .notifications[0].duplicateOf == \"$ORIGINAL_ID\"" \
+  "expected the repeat SUPPRESSED as a duplicate of the original"
+SUPPRESSED_ID=$(id_of user-ok)
+submit "$RUN_ID-dedup-3" "$(jq -c '.body = "A second alert for the same event."' <<<"$DEDUP_PAYLOAD")"
+expect_status 202
+check '.notifications[0].status == "ACCEPTED"' "expected a different message for the same event ACCEPTED"
+SECOND_ID=$(id_of user-ok)
+await_final "$SUPPRESSED_ID" SUPPRESSED
+check ".deliveries == [] and .duplicateOf == \"$ORIGINAL_ID\"" "expected no deliveries and duplicateOf the original"
+show_audit "$SUPPRESSED_ID"
+check '[.events[].type] == ["SUPPRESSED"]' "expected SUPPRESSED as the only event"
+await_final "$ORIGINAL_ID" DELIVERED
+show_audit "$ORIGINAL_ID"
+check "[.events[] | select(.type == \"DUPLICATE_EVENT\") | .detail] == [\"suppressed $SUPPRESSED_ID\"]" \
+  "expected DUPLICATE_EVENT on the original"
+await_final "$SECOND_ID" DELIVERED
+ok
+
+step "7. Bounce: user-bounce, email accepted, then bounced by vendor callback"
 submit_new bounce user-bounce
 BOUNCE_ID=$NOTIFICATION_ID
 await_final "$BOUNCE_ID" FAILED
@@ -197,7 +223,7 @@ check '(.deliveries | length) == 1 and .deliveries[0].channel == "EMAIL"
 show_audit "$BOUNCE_ID"
 ok
 
-step "7. Validation error: submit without Idempotency-Key"
+step "8. Validation error: submit without Idempotency-Key"
 request POST "$API_PATH" -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
   --data "$(payload "$RUN_ID-validation" "$(recipient user-ok)")"
 echo "   POST $API_PATH  (no Idempotency-Key)  -> $STATUS  $(jq -c '.errors' <<<"$BODY")"
@@ -205,7 +231,7 @@ expect_status 400
 check '.errors | length == 1 and .[0].code == 4001 and .[0].field == "Idempotency-Key"' "expected 4001"
 ok
 
-step "8. Authentication error: status read without X-API-Key"
+step "9. Authentication error: status read without X-API-Key"
 request GET "$API_PATH/$HAPPY_ID"
 echo "   GET  $API_PATH/$HAPPY_ID  (no X-API-Key)  -> $STATUS  $(jq -c '.errors' <<<"$BODY")"
 expect_status 401
@@ -213,4 +239,4 @@ check '.errors[0].code == 4011' "expected 4011"
 ok
 
 echo
-echo "Demo passed: 8 steps."
+echo "Demo passed: 9 steps."
