@@ -12,9 +12,9 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Body of {@code GET /notifications/{id}} (architecture.md, Status). Top-level timestamps are
- * always present (null when unset); per-delivery {@code reason}, {@code sentAt}, and {@code
- * finalizedAt} are omitted until they apply.
+ * Body of {@code GET /notifications/{id}} (architecture.md, Status). Top-level fields are always
+ * present (null when unset, e.g. {@code duplicateOf} unless suppressed); per-delivery {@code
+ * reason}, {@code sentAt}, and {@code finalizedAt} are omitted until they apply.
  */
 record StatusResponse(
     UUID notificationId,
@@ -29,6 +29,7 @@ record StatusResponse(
     Instant createdAt,
     Instant scheduledAt,
     Instant expiresAt,
+    UUID duplicateOf,
     List<Item> deliveries) {
 
   @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -55,6 +56,7 @@ record StatusResponse(
         s.createdAt(),
         s.scheduledAt(),
         s.expiresAt(),
+        s.duplicateOf(),
         s.deliveries().stream()
             .map(
                 d ->

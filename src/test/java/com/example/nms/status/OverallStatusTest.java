@@ -67,6 +67,29 @@ class OverallStatusTest {
     assertThat(OverallStatus.derive(scheduledAt, NOW, deliveries)).isEqualTo(expected);
   }
 
+  /** #14: a suppressed notification is SUPPRESSED first, before SCHEDULED and NOT_ROUTED. */
+  static Stream<Arguments> suppressed() {
+    return Stream.of(
+        row(null, List.of(), OverallStatus.SUPPRESSED),
+        row(LATER, List.of(), OverallStatus.SUPPRESSED),
+        row(LATER, List.of(PENDING), OverallStatus.SUPPRESSED),
+        row(null, List.of(DELIVERED), OverallStatus.SUPPRESSED));
+  }
+
+  @ParameterizedTest(name = "suppressed, scheduledAt {0}, {1} -> {2}")
+  @MethodSource("suppressed")
+  void suppressedWinsOverEveryOtherRule(
+      Instant scheduledAt, List<DeliveryStatus> deliveries, OverallStatus expected) {
+    assertThat(OverallStatus.derive(true, scheduledAt, NOW, deliveries)).isEqualTo(expected);
+  }
+
+  @ParameterizedTest(name = "not suppressed, scheduledAt {0}, {1} -> {2}")
+  @MethodSource("table")
+  void notSuppressedIsTheGreenfieldDerivation(
+      Instant scheduledAt, List<DeliveryStatus> deliveries, OverallStatus expected) {
+    assertThat(OverallStatus.derive(false, scheduledAt, NOW, deliveries)).isEqualTo(expected);
+  }
+
   private static Arguments row(
       Instant scheduledAt, List<DeliveryStatus> deliveries, OverallStatus expected) {
     return Arguments.of(scheduledAt, deliveries, expected);

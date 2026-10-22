@@ -7,11 +7,13 @@ import java.util.EnumSet;
 import java.util.Set;
 
 /**
- * Overall status of one notification, derived on read from its deliveries and never stored (A-21,
- * architecture.md "Overall status"). A separate vocabulary from delivery {@code status}.
- * "Delivered" means every routed channel was delivered (A-22).
+ * Overall status of one notification, derived on read from its deliveries (and whether intake
+ * suppressed it) and never stored (A-21, architecture.md "Overall status"). A separate vocabulary
+ * from delivery {@code status}. "Delivered" means every routed channel was delivered (A-22).
  */
 public enum OverallStatus {
+  /** Suppressed at intake as a repeat of an earlier event and message: never routed (ADR-0006). */
+  SUPPRESSED,
   /** Routing found no usable channel: there are no deliveries. */
   NOT_ROUTED,
   /** Before {@code scheduledAt}; nothing has been attempted. */
@@ -38,14 +40,17 @@ public enum OverallStatus {
   }
 
   /**
-   * The first matching rule wins: no deliveries; before {@code scheduledAt} with nothing attempted;
-   * anything still active; anything awaiting a callback; then the final mix.
+   * The first matching rule wins: suppressed; no deliveries; before {@code scheduledAt} with
+   * nothing attempted; anything still active; anything awaiting a callback; then the final mix.
    *
    * @param suppressed whether the notification itself was suppressed at intake
    * @param scheduledAt the notification's schedule time, may be null
    */
   public static OverallStatus derive(
       boolean suppressed, Instant scheduledAt, Instant now, Collection<DeliveryStatus> deliveries) {
+    if (suppressed) {
+      return SUPPRESSED;
+    }
     if (deliveries.isEmpty()) {
       return NOT_ROUTED;
     }
